@@ -15,6 +15,8 @@ A comprehensive Python tool for validating and correcting BibTeX/BibLaTeX files 
 - **Unicode Character Detection**: Identifies problematic unicode characters like em-dashes (—), en-dashes (–), smart quotes, and ellipses
 - **Ampersand Checking**: Finds unescaped ampersands that should be `\&` in LaTeX
 - **Special Character Validation**: Detects improperly formatted special characters (%, _, etc.)
+- **Accent Formatting**: Detects unescaped accented characters (é, ñ, ü, etc.) that should be LaTeX-formatted (\'e, \~n, \"u)
+- **Name Formatting**: Checks author/editor names for parsing issues, numbers, unusual characters, and inconsistent separators
 
 ## Installation
 
@@ -102,6 +104,8 @@ python biblatex_diagnostics.py --help
 - `--no-unicode`: Skip unicode character checking
 - `--no-ampersand`: Skip ampersand checking
 - `--no-special`: Skip special character checking
+- `--no-accents`: Skip accent formatting checking
+- `--no-names`: Skip name formatting checking
 
 ### Update Options
 - `--update-scholar`: Update entries with Google Scholar data (requires `-o`)
@@ -119,6 +123,8 @@ This will check all ~700 entries for:
 - Problematic unicode characters
 - Unescaped ampersands
 - Special character formatting issues
+- Accent formatting issues
+- Name formatting issues
 
 ### Example 2: Clean and Correct References
 ```bash
@@ -144,6 +150,13 @@ python biblatex_diagnostics.py references.bib -r diagnostics_report.txt
 ```
 
 Run all diagnostics and save the warnings and errors to a text file for later review.
+
+### Example 5: Check Accent and Name Formatting Only
+```bash
+python biblatex_diagnostics.py references.bib --no-scholar --no-doi --no-unicode --no-ampersand --no-special
+```
+
+Focus only on accent and name formatting issues without running other checks. Useful for cleaning up author names and special characters.
 
 ## Output
 

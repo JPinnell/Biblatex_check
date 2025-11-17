@@ -296,9 +296,121 @@ class BibTeXDiagnostics:
 
         return issues
 
+    def check_accent_formatting(self, key: str, entry: Entry) -> List[str]:
+        """
+        Check for unescaped accented characters that should be LaTeX-formatted.
+
+        Returns:
+            List of fields with accent formatting issues
+        """
+        issues = []
+
+        # Common accented characters that should be LaTeX-formatted
+        accent_chars = {
+            'á': r"\'a", 'à': r"\`a", 'ä': r'\"a', 'â': r"\^a", 'ã': r"\~a", 'å': r"\aa",
+            'Á': r"\'A", 'À': r"\`A", 'Ä': r'\"A', 'Â': r"\^A", 'Ã': r"\~A", 'Å': r"\AA",
+            'é': r"\'e", 'è': r"\`e", 'ë': r'\"e', 'ê': r"\^e",
+            'É': r"\'E", 'È': r"\`E", 'Ë': r'\"E', 'Ê': r"\^E",
+            'í': r"\'i", 'ì': r"\`i", 'ï': r'\"i', 'î': r"\^i",
+            'Í': r"\'I", 'Ì': r"\`I", 'Ï': r'\"I', 'Î': r"\^I",
+            'ó': r"\'o", 'ò': r"\`o", 'ö': r'\"o', 'ô': r"\^o", 'õ': r"\~o", 'ø': r"\o",
+            'Ó': r"\'O", 'Ò': r"\`O", 'Ö': r'\"O', 'Ô': r"\^O", 'Õ': r"\~O", 'Ø': r"\O",
+            'ú': r"\'u", 'ù': r"\`u", 'ü': r'\"u', 'û': r"\^u",
+            'Ú': r"\'U", 'Ù': r"\`U", 'Ü': r'\"U', 'Û': r"\^U",
+            'ñ': r"\~n", 'Ñ': r"\~N",
+            'ç': r"\c{c}", 'Ç': r"\c{C}",
+            'ß': r"\ss",
+            'æ': r"\ae", 'Æ': r"\AE",
+            'œ': r"\oe", 'Œ': r"\OE",
+            'ł': r"\l", 'Ł': r"\L",
+        }
+
+        for field, value in entry.fields.items():
+            value_str = str(value)
+            found_chars = []
+
+            for char, latex_form in accent_chars.items():
+                if char in value_str:
+                    found_chars.append(f"{char} (should be {latex_form})")
+
+            if found_chars:
+                issues.append(field)
+                chars_str = ", ".join(found_chars)
+                self.issues.append(
+                    f"Entry {key}, field '{field}': Contains unescaped accented characters: {chars_str}"
+                )
+
+        return issues
+
+    def check_name_formatting(self, key: str, entry: Entry) -> List[str]:
+        """
+        Check for name formatting issues in author/editor fields.
+
+        Returns:
+            List of fields with name formatting issues
+        """
+        issues = []
+
+        # Check author and editor fields
+        for role in ['author', 'editor']:
+            if role in entry.persons:
+                persons = entry.persons[role]
+
+                for idx, person in enumerate(persons):
+                    person_str = str(person)
+
+                    # Check for potential issues
+                    warnings = []
+
+                    # Check for single-word names (might indicate parsing issues)
+                    if ' ' not in person_str.strip() and ',' not in person_str.strip():
+                        warnings.append("single-word name (may indicate parsing issue)")
+
+                    # Check for numbers in names (likely an error)
+                    if re.search(r'\d', person_str):
+                        warnings.append("contains numbers")
+
+                    # Check for multiple consecutive spaces
+                    if '  ' in person_str:
+                        warnings.append("multiple consecutive spaces")
+
+                    # Check for unusual characters
+                    if re.search(r'[{}[\]<>|]', person_str):
+                        warnings.append("unusual characters")
+
+                    if warnings:
+                        issues.append(role)
+                        warnings_str = ", ".join(warnings)
+                        self.issues.append(
+                            f"Entry {key}, {role} #{idx+1} '{person_str}': {warnings_str}"
+                        )
+
+        # Also check the raw author/editor fields for common issues
+        for field in ['author', 'editor']:
+            if field in entry.fields:
+                value_str = str(entry.fields[field])
+
+                # Check for inconsistent name separators
+                if ' and ' in value_str and '&' in value_str:
+                    issues.append(field)
+                    self.issues.append(
+                        f"Entry {key}, field '{field}': Inconsistent separators (mixes 'and' and '&')"
+                    )
+
+                # Check for missing 'and' between authors (common error)
+                # This looks for patterns like "Smith, J. Doe, A." without 'and'
+                if re.search(r',\s+[A-Z][a-z]+,\s+[A-Z]\.(?!\s+and\s+)', value_str):
+                    issues.append(field)
+                    self.issues.append(
+                        f"Entry {key}, field '{field}': Possible missing 'and' between authors"
+                    )
+
+        return issues
+
     def run_diagnostics(self, bib_data: BibliographyData, check_scholar: bool = True,
                        check_doi: bool = True, check_unicode: bool = True,
-                       check_ampersand: bool = True, check_special: bool = True) -> None:
+                       check_ampersand: bool = True, check_special: bool = True,
+                       check_accents: bool = True, check_names: bool = True) -> None:
         """
         Run all selected diagnostics on the BibTeX database.
 
@@ -309,6 +421,8 @@ class BibTeXDiagnostics:
             check_unicode: Check for unicode issues
             check_ampersand: Check for unescaped ampersands
             check_special: Check for special character issues
+            check_accents: Check for accent formatting issues
+            check_names: Check for name formatting issues
         """
         total_entries = len(bib_data.entries)
         print(f"\nRunning diagnostics on {total_entries} entries...")
@@ -332,6 +446,12 @@ class BibTeXDiagnostics:
 
             if check_special:
                 self.check_special_characters(key, entry)
+
+            if check_accents:
+                self.check_accent_formatting(key, entry)
+
+            if check_names:
+                self.check_name_formatting(key, entry)
 
     def fix_with_google_scholar(self, bib_data: BibliographyData) -> BibliographyData:
         """
@@ -439,6 +559,10 @@ Examples:
                        help='Skip ampersand checking')
     parser.add_argument('--no-special', action='store_true',
                        help='Skip special character checking')
+    parser.add_argument('--no-accents', action='store_true',
+                       help='Skip accent formatting checking')
+    parser.add_argument('--no-names', action='store_true',
+                       help='Skip name formatting checking')
 
     # Update options
     parser.add_argument('--update-scholar', action='store_true',
@@ -470,7 +594,9 @@ Examples:
                 check_doi=not args.no_doi,
                 check_unicode=not args.no_unicode,
                 check_ampersand=not args.no_ampersand,
-                check_special=not args.no_special
+                check_special=not args.no_special,
+                check_accents=not args.no_accents,
+                check_names=not args.no_names
             )
 
         # Generate and output report
