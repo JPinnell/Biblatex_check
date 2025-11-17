@@ -1016,8 +1016,10 @@ Examples:
     parser.add_argument('-o', '--output', help='Output file for corrected BibTeX')
     parser.add_argument('-r', '--report-file', help='Save diagnostic report to file (default: print to terminal)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--delay', type=float, default=5.0,
-                       help='Delay between Semantic Scholar API queries (default: 5.0 seconds)')
+    # Default delay: 1.0 second with API key (1 req/sec limit), 5.0 seconds without
+    default_delay = 1.0 if SEMANTIC_SCHOLAR_API_KEY else 5.0
+    parser.add_argument('--delay', type=float, default=default_delay,
+                       help=f'Delay between Semantic Scholar API queries (default: {default_delay} seconds)')
 
     # Diagnostic options
     parser.add_argument('--no-scholar', action='store_true',

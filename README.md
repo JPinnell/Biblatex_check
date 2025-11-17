@@ -51,15 +51,36 @@ pip install pybtex requests
 - **pybtex** (>=0.24.0): BibTeX file parsing and writing
 - **requests** (>=2.28.0): HTTP requests for Semantic Scholar API and DOI validation
 
-### Semantic Scholar API Key (Optional)
+### Semantic Scholar API Key (Recommended)
 
-The Semantic Scholar API can be used without authentication, but you may encounter rate limits or access restrictions. To get higher rate limits, you can obtain a free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api) and set it as an environment variable:
+The Semantic Scholar API can be used without authentication, but you may encounter rate limits or access restrictions. **With an API key, you get 1 request per second** (vs slower unauthenticated access).
 
+To get a free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api):
+
+**Quick Setup (using the provided script):**
 ```bash
-export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"
+# Copy the template and edit it with your API key
+cp setup_api_key.sh.template setup_api_key.sh
+nano setup_api_key.sh  # Edit and replace YOUR_API_KEY_HERE with your actual key
+
+# Source it for the current session
+source setup_api_key.sh
 ```
 
-The tool will automatically use the API key if it's set in your environment.
+**Manual Setup:**
+```bash
+# Set for current session
+export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"
+
+# Or add to your ~/.bashrc or ~/.zshrc for permanent setup
+echo 'export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**Benefits with API key:**
+- Default delay automatically adjusts to 1 second (vs 5 seconds without key)
+- More reliable access with higher rate limits
+- Faster processing of large bibliography files
 
 ## Usage
 

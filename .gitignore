@@ -15,6 +15,9 @@ test_report.txt
 *_report.txt
 diagnostics_report.txt
 
+# API key configuration (contains sensitive data)
+setup_api_key.sh
+
 # Editor files
 .vscode/
 .idea/
