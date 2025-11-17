@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 BibTeX Diagnostic Tool
-A comprehensive tool for validating and correcting BibTeX entries using Google Scholar as ground truth.
+A comprehensive tool for validating and correcting BibTeX entries using Semantic Scholar as ground truth.
 """
 
 import re
 import sys
+import os
 import time
 import argparse
 import requests
@@ -17,12 +18,10 @@ from difflib import SequenceMatcher
 from pybtex.database import parse_file, BibliographyData, Entry
 from pybtex.database.output.bibtex import Writer
 
-try:
-    from scholarly import scholarly
-    SCHOLARLY_AVAILABLE = True
-except ImportError:
-    SCHOLARLY_AVAILABLE = False
-    print("Warning: scholarly package not fully functional. Google Scholar features may be limited.")
+# Semantic Scholar API endpoint
+SEMANTIC_SCHOLAR_API_BASE = "https://api.semanticscholar.org/graph/v1"
+SEMANTIC_SCHOLAR_AVAILABLE = True  # API is always available, just needs rate limiting
+SEMANTIC_SCHOLAR_API_KEY = os.environ.get('SEMANTIC_SCHOLAR_API_KEY', None)
 
 
 # Biblatex entry type specifications
@@ -112,7 +111,7 @@ class BibTeXDiagnostics:
 
         Args:
             verbose: Enable verbose output
-            delay: Delay between Google Scholar queries (seconds) to avoid rate limiting
+            delay: Delay between Semantic Scholar API queries (seconds) to avoid rate limiting
         """
         self.verbose = verbose
         self.delay = delay
@@ -137,19 +136,19 @@ class BibTeXDiagnostics:
         writer.write_file(bib_data, filepath)
         self.log(f"Saved corrected BibTeX to: {filepath}")
 
-    def check_google_scholar(self, key: str, entry: Entry, update: bool = False) -> Optional[Entry]:
+    def check_semantic_scholar(self, key: str, entry: Entry, update: bool = False) -> Optional[Entry]:
         """
-        Check entry against Google Scholar and optionally update it.
+        Check entry against Semantic Scholar and optionally update it.
 
         Args:
             key: BibTeX entry key
             entry: BibTeX entry
-            update: If True, return the Google Scholar entry for updating
+            update: If True, return the Semantic Scholar entry for updating
 
         Returns:
-            Google Scholar entry if found and update=True, otherwise None
+            Semantic Scholar entry if found and update=True, otherwise None
         """
-        if not SCHOLARLY_AVAILABLE:
+        if not SEMANTIC_SCHOLAR_AVAILABLE:
             return None
 
         title = entry.fields.get('title', '').strip('{}').strip()
@@ -157,41 +156,81 @@ class BibTeXDiagnostics:
             self.issues.append(f"Entry {key} has no title")
             return None
 
-        self.log(f"Searching Google Scholar for: {title}")
+        self.log(f"Searching Semantic Scholar for: {title}")
 
-        try:
-            # Search for the paper by title
-            search_query = scholarly.search_pubs(title)
-            result = next(search_query, None)
+        max_retries = 3
+        retry_delay = 2  # seconds
 
-            if result:
-                # Check if titles match (allowing for some variation)
-                gs_title = result.get('bib', {}).get('title', '').lower()
-                entry_title = title.lower()
+        for attempt in range(max_retries):
+            try:
+                # Search for the paper by title using Semantic Scholar API
+                search_url = f"{SEMANTIC_SCHOLAR_API_BASE}/paper/search"
+                params = {
+                    'query': title,
+                    'limit': 1,
+                    'fields': 'title,authors,year,venue,doi,abstract,publicationTypes,externalIds'
+                }
 
-                # Simple similarity check
-                if self._titles_match(entry_title, gs_title):
-                    self.log(f"✓ Match found on Google Scholar: {result['bib']['title']}")
+                # Add headers with User-Agent and optional API key
+                headers = {
+                    'User-Agent': 'biblatex-diagnostics/1.0 (https://github.com/user/biblatex-diagnostics)'
+                }
+                if SEMANTIC_SCHOLAR_API_KEY:
+                    headers['x-api-key'] = SEMANTIC_SCHOLAR_API_KEY
 
-                    if update:
-                        # Convert to BibTeX format
-                        gs_entry = self._scholarly_to_entry(result, key, entry.type)
-                        return gs_entry
+                response = requests.get(search_url, params=params, headers=headers, timeout=10)
+
+                # Handle rate limiting
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        self.log(f"Rate limited, waiting {retry_delay} seconds before retry...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
                     else:
-                        # Just report the match
-                        self.corrections.append({
-                            'entry_id': key,
-                            'type': 'google_scholar_match',
-                            'message': f"Found matching entry on Google Scholar",
-                            'gs_data': result['bib']
-                        })
-                else:
-                    self.issues.append(f"Entry {key}: Title mismatch - '{title}' vs '{result['bib']['title']}'")
-            else:
-                self.issues.append(f"Entry {key}: Not found on Google Scholar")
+                        self.issues.append(f"Entry {key}: Semantic Scholar rate limit exceeded")
+                        return None
 
-        except Exception as e:
-            self.issues.append(f"Entry {key}: Google Scholar error - {str(e)}")
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get('data') and len(data['data']) > 0:
+                    result = data['data'][0]
+
+                    # Check if titles match (allowing for some variation)
+                    ss_title = result.get('title', '').lower()
+                    entry_title = title.lower()
+
+                    # Simple similarity check
+                    if self._titles_match(entry_title, ss_title):
+                        self.log(f"✓ Match found on Semantic Scholar: {result['title']}")
+
+                        if update:
+                            # Convert to BibTeX format
+                            ss_entry = self._semantic_scholar_to_entry(result, key, entry.type)
+                            return ss_entry
+                        else:
+                            # Just report the match
+                            self.corrections.append({
+                                'entry_id': key,
+                                'type': 'semantic_scholar_match',
+                                'message': f"Found matching entry on Semantic Scholar",
+                                'ss_data': result
+                            })
+                    else:
+                        self.issues.append(f"Entry {key}: Title mismatch - '{title}' vs '{result['title']}'")
+                else:
+                    self.issues.append(f"Entry {key}: Not found on Semantic Scholar")
+
+                break  # Success, exit retry loop
+
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    self.log(f"Request error, retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    self.issues.append(f"Entry {key}: Semantic Scholar error - {str(e)}")
 
         return None
 
@@ -215,57 +254,67 @@ class BibTeXDiagnostics:
 
         return similarity > 0.7  # 70% similarity threshold
 
-    def _scholarly_to_entry(self, scholarly_result: Dict, entry_key: str, entry_type: str) -> Entry:
-        """Convert scholarly result to pybtex Entry format."""
-        bib_data = scholarly_result.get('bib', {})
-
-        # Determine entry type
-        if 'venue' in bib_data:
-            venue = bib_data['venue'].lower()
-            if 'journal' in venue or 'trans' in venue:
+    def _semantic_scholar_to_entry(self, ss_result: Dict, entry_key: str, entry_type: str) -> Entry:
+        """Convert Semantic Scholar result to pybtex Entry format."""
+        # Determine entry type from publication types
+        pub_types = ss_result.get('publicationTypes', [])
+        if 'JournalArticle' in pub_types:
+            etype = 'article'
+        elif 'Conference' in pub_types or 'ConferencePaper' in pub_types:
+            etype = 'inproceedings'
+        elif 'Book' in pub_types:
+            etype = 'book'
+        else:
+            # Use venue to guess if not specified in types
+            venue = ss_result.get('venue', '').lower()
+            if venue and ('journal' in venue or 'trans' in venue):
                 etype = 'article'
-            elif 'conference' in venue or 'proc' in venue:
+            elif venue and ('conference' in venue or 'proc' in venue):
                 etype = 'inproceedings'
             else:
                 etype = entry_type or 'article'
-        else:
-            etype = entry_type or 'article'
 
         # Create fields dict
         fields = {
-            'title': '{' + bib_data.get('title', '') + '}',
-            'year': str(bib_data.get('pub_year', '')),
+            'title': '{' + ss_result.get('title', '') + '}',
         }
 
+        # Add year
+        if 'year' in ss_result and ss_result['year']:
+            fields['year'] = str(ss_result['year'])
+
         # Add venue
-        if 'venue' in bib_data:
+        if 'venue' in ss_result and ss_result['venue']:
             if etype == 'article':
-                fields['journal'] = bib_data['venue']
-            else:
-                fields['booktitle'] = bib_data['venue']
+                fields['journaltitle'] = ss_result['venue']
+            elif etype == 'inproceedings':
+                fields['booktitle'] = ss_result['venue']
+
+        # Add DOI
+        if 'doi' in ss_result and ss_result['doi']:
+            fields['doi'] = ss_result['doi']
+
+        # Add arXiv ID if available
+        external_ids = ss_result.get('externalIds', {})
+        if external_ids.get('ArXiv'):
+            fields['eprint'] = external_ids['ArXiv']
+            fields['eprinttype'] = 'arxiv'
 
         # Add abstract if available
-        if 'abstract' in bib_data:
-            fields['abstract'] = '{' + bib_data['abstract'] + '}'
-
-        # Try to get DOI
-        if 'pub_url' in scholarly_result:
-            doi_match = re.search(r'10\.\d{4,}/[^\s]+', scholarly_result['pub_url'])
-            if doi_match:
-                fields['doi'] = doi_match.group(0)
+        if 'abstract' in ss_result and ss_result['abstract']:
+            fields['abstract'] = '{' + ss_result['abstract'] + '}'
 
         # Handle authors
         from pybtex.database import Person
         persons = {}
-        if 'author' in bib_data:
+        if 'authors' in ss_result and ss_result['authors']:
             author_list = []
-            authors = bib_data['author']
-            if isinstance(authors, str):
-                authors = [authors]
-            for author in authors:
-                # Parse author name
-                author_list.append(Person(author))
-            persons['author'] = author_list
+            for author in ss_result['authors']:
+                author_name = author.get('name', '')
+                if author_name:
+                    author_list.append(Person(author_name))
+            if author_list:
+                persons['author'] = author_list
 
         return Entry(etype, fields=fields, persons=persons)
 
@@ -808,7 +857,7 @@ class BibTeXDiagnostics:
 
         Args:
             bib_data: The BibTeX database to check
-            check_scholar: Check against Google Scholar
+            check_scholar: Check against Semantic Scholar
             check_doi: Validate DOIs
             check_unicode: Check for unicode issues
             check_ampersand: Check for unescaped ampersands
@@ -853,8 +902,8 @@ class BibTeXDiagnostics:
             if check_completeness_flag:
                 self.check_completeness(key, entry)
 
-            if check_scholar and SCHOLARLY_AVAILABLE:
-                self.check_google_scholar(key, entry, update=False)
+            if check_scholar and SEMANTIC_SCHOLAR_AVAILABLE:
+                self.check_semantic_scholar(key, entry, update=False)
                 time.sleep(self.delay)  # Rate limiting
 
             if check_doi:
@@ -875,9 +924,9 @@ class BibTeXDiagnostics:
             if check_names:
                 self.check_name_formatting(key, entry)
 
-    def fix_with_google_scholar(self, bib_data: BibliographyData) -> BibliographyData:
+    def fix_with_semantic_scholar(self, bib_data: BibliographyData) -> BibliographyData:
         """
-        Update BibTeX entries with Google Scholar data where matches are found.
+        Update BibTeX entries with Semantic Scholar data where matches are found.
 
         Args:
             bib_data: The BibTeX database to update
@@ -885,12 +934,12 @@ class BibTeXDiagnostics:
         Returns:
             Updated BibTeX database
         """
-        if not SCHOLARLY_AVAILABLE:
-            print("Error: scholarly package not available. Cannot update with Google Scholar.")
+        if not SEMANTIC_SCHOLAR_AVAILABLE:
+            print("Error: Semantic Scholar API not available. Cannot update entries.")
             return bib_data
 
         total_entries = len(bib_data.entries)
-        print(f"\nUpdating {total_entries} entries with Google Scholar data...")
+        print(f"\nUpdating {total_entries} entries with Semantic Scholar data...")
         print("=" * 60)
 
         updated_count = 0
@@ -898,13 +947,13 @@ class BibTeXDiagnostics:
         for idx, (key, entry) in enumerate(list(bib_data.entries.items()), 1):
             print(f"\n[{idx}/{total_entries}] Processing: {key}")
 
-            gs_entry = self.check_google_scholar(key, entry, update=True)
+            ss_entry = self.check_semantic_scholar(key, entry, update=True)
 
-            if gs_entry:
-                # Update entry with Google Scholar data
-                bib_data.entries[key] = gs_entry
+            if ss_entry:
+                # Update entry with Semantic Scholar data
+                bib_data.entries[key] = ss_entry
                 updated_count += 1
-                print(f"  ✓ Updated with Google Scholar data")
+                print(f"  ✓ Updated with Semantic Scholar data")
             else:
                 print(f"  ✗ No update available")
 
@@ -942,7 +991,7 @@ class BibTeXDiagnostics:
 def main():
     """Main entry point for the diagnostic tool."""
     parser = argparse.ArgumentParser(
-        description='BibTeX Diagnostic Tool - Validate and correct BibTeX entries using Google Scholar',
+        description='BibTeX Diagnostic Tool - Validate and correct BibTeX entries using Semantic Scholar',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -952,7 +1001,7 @@ Examples:
   # Save diagnostic report to file
   python biblatex_diagnostics.py input.bib -r report.txt
 
-  # Update entries with Google Scholar data
+  # Update entries with Semantic Scholar data
   python biblatex_diagnostics.py input.bib --update-scholar -o corrected.bib
 
   # Run specific diagnostics only
@@ -968,11 +1017,11 @@ Examples:
     parser.add_argument('-r', '--report-file', help='Save diagnostic report to file (default: print to terminal)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('--delay', type=float, default=5.0,
-                       help='Delay between Google Scholar queries (default: 5.0 seconds)')
+                       help='Delay between Semantic Scholar API queries (default: 5.0 seconds)')
 
     # Diagnostic options
     parser.add_argument('--no-scholar', action='store_true',
-                       help='Skip Google Scholar checking')
+                       help='Skip Semantic Scholar checking')
     parser.add_argument('--no-doi', action='store_true',
                        help='Skip DOI validation')
     parser.add_argument('--no-unicode', action='store_true',
@@ -1002,7 +1051,7 @@ Examples:
 
     # Update options
     parser.add_argument('--update-scholar', action='store_true',
-                       help='Update entries with Google Scholar data (requires -o)')
+                       help='Update entries with Semantic Scholar data (requires -o)')
 
     args = parser.parse_args()
 
@@ -1019,7 +1068,7 @@ Examples:
 
         if args.update_scholar:
             # Update mode
-            bib_data = diagnostics.fix_with_google_scholar(bib_data)
+            bib_data = diagnostics.fix_with_semantic_scholar(bib_data)
             diagnostics.save_bibtex(bib_data, args.output)
             print(f"\n✓ Corrected BibTeX saved to: {args.output}")
         else:
