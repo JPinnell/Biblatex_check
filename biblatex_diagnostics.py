@@ -404,22 +404,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run all diagnostics (no modifications)
+  # Run all diagnostics (print to terminal)
   python biblatex_diagnostics.py input.bib
+
+  # Save diagnostic report to file
+  python biblatex_diagnostics.py input.bib -r report.txt
 
   # Update entries with Google Scholar data
   python biblatex_diagnostics.py input.bib --update-scholar -o corrected.bib
 
   # Run specific diagnostics only
-  python biblatex_diagnostics.py input.bib --no-scholar --check-doi --check-unicode
+  python biblatex_diagnostics.py input.bib --no-scholar
 
-  # Verbose output with custom delay
-  python biblatex_diagnostics.py input.bib -v --delay 3.0
+  # Verbose output with custom delay and save report
+  python biblatex_diagnostics.py input.bib -v --delay 3.0 -r diagnostics.txt
         """
     )
 
     parser.add_argument('input_file', help='Input BibTeX file')
     parser.add_argument('-o', '--output', help='Output file for corrected BibTeX')
+    parser.add_argument('-r', '--report-file', help='Save diagnostic report to file (default: print to terminal)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('--delay', type=float, default=5.0,
                        help='Delay between Google Scholar queries (default: 5.0 seconds)')
@@ -469,8 +473,17 @@ Examples:
                 check_special=not args.no_special
             )
 
-        # Print report
-        print(diagnostics.generate_report())
+        # Generate and output report
+        report = diagnostics.generate_report()
+
+        if args.report_file:
+            # Save report to file
+            with open(args.report_file, 'w', encoding='utf-8') as f:
+                f.write(report)
+            print(f"\n✓ Diagnostic report saved to: {args.report_file}")
+        else:
+            # Print to terminal
+            print(report)
 
     except FileNotFoundError:
         print(f"Error: File '{args.input_file}' not found", file=sys.stderr)

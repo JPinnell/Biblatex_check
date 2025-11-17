@@ -1,3 +1,0 @@
-pybtex>=0.24.0
-scholarly>=1.7.0
-requests>=2.28.0

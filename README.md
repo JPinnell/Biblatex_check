@@ -24,10 +24,20 @@ git clone <repository-url>
 cd Biblatex_check
 ```
 
-2. Install dependencies:
+2. Install required packages using conda (or pip):
 ```bash
-pip install -r requirements.txt
+conda install pybtex scholarly requests
 ```
+
+Or with pip:
+```bash
+pip install pybtex scholarly requests
+```
+
+### Required Packages
+- **pybtex** (>=0.24.0): BibTeX file parsing and writing
+- **scholarly** (>=1.7.0): Google Scholar integration
+- **requests** (>=2.28.0): HTTP requests for DOI validation
 
 ## Usage
 
@@ -37,6 +47,14 @@ Run all diagnostics on your BibTeX file without making changes:
 
 ```bash
 python biblatex_diagnostics.py references.bib
+```
+
+### Save Report to File
+
+Save the diagnostic report to a text file instead of printing to terminal:
+
+```bash
+python biblatex_diagnostics.py references.bib -r report.txt
 ```
 
 ### Update with Google Scholar Data
@@ -74,6 +92,7 @@ python biblatex_diagnostics.py --help
 
 ### Optional Arguments
 - `-o, --output`: Output file for corrected BibTeX
+- `-r, --report-file`: Save diagnostic report to file (default: print to terminal)
 - `-v, --verbose`: Enable verbose output
 - `--delay`: Delay between Google Scholar queries in seconds (default: 5.0)
 
@@ -118,6 +137,13 @@ python biblatex_diagnostics.py refs.bib --no-scholar --no-doi --no-ampersand --n
 ```
 
 Quickly check just for unicode issues without hitting Google Scholar.
+
+### Example 4: Save Report to File
+```bash
+python biblatex_diagnostics.py references.bib -r diagnostics_report.txt
+```
+
+Run all diagnostics and save the warnings and errors to a text file for later review.
 
 ## Output
 
