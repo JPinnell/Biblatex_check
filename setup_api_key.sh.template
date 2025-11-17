@@ -1,0 +1,20 @@
+#!/bin/bash
+# Setup script for Semantic Scholar API key
+#
+# Instructions:
+# 1. Copy this file: cp setup_api_key.sh.template setup_api_key.sh
+# 2. Edit setup_api_key.sh and replace YOUR_API_KEY_HERE with your actual API key
+# 3. Run: source setup_api_key.sh
+
+# Your Semantic Scholar API key
+export SEMANTIC_SCHOLAR_API_KEY="YOUR_API_KEY_HERE"
+
+echo "Semantic Scholar API key has been set for this session."
+echo "To make this permanent, add the following line to your ~/.bashrc or ~/.zshrc:"
+echo ""
+echo "export SEMANTIC_SCHOLAR_API_KEY=\"YOUR_API_KEY_HERE\""
+echo ""
+echo "Then run: source ~/.bashrc  (or source ~/.zshrc)"
+echo ""
+echo "With the API key, the tool will use a 1 second delay (1 req/sec limit)"
+echo "instead of the default 5 seconds for unauthenticated requests."
