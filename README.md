@@ -1,14 +1,14 @@
 # BibTeX Diagnostic Tool
 
-A comprehensive Python tool for validating and correcting BibTeX/BibLaTeX files using Google Scholar as the ground truth. Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
+A comprehensive Python tool for validating and correcting BibTeX/BibLaTeX files using Semantic Scholar as the ground truth. Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
 
 ## Features
 
-### Main Feature: Google Scholar Validation
-- **Cross-reference with Google Scholar**: Automatically checks each entry's title against Google Scholar
-- **Ground Truth Replacement**: If a matching title is found on Google Scholar, pulls the authoritative BibTeX entry
+### Main Feature: Semantic Scholar Validation
+- **Cross-reference with Semantic Scholar**: Automatically checks each entry's title against Semantic Scholar API
+- **Ground Truth Replacement**: If a matching title is found, pulls the authoritative BibTeX entry
 - **Smart Title Matching**: Uses fuzzy matching to handle variations in punctuation and formatting
-- **Rate-Limited Queries**: Respects Google Scholar's rate limits with configurable delays
+- **Rate-Limited Queries**: Handles API rate limits (429 errors) with automatic retry and exponential backoff
 
 ### Additional Diagnostics
 
@@ -39,18 +39,27 @@ cd Biblatex_check
 
 2. Install required packages using conda (or pip):
 ```bash
-conda install pybtex scholarly requests
+conda install pybtex requests
 ```
 
 Or with pip:
 ```bash
-pip install pybtex scholarly requests
+pip install pybtex requests
 ```
 
 ### Required Packages
 - **pybtex** (>=0.24.0): BibTeX file parsing and writing
-- **scholarly** (>=1.7.0): Google Scholar integration
-- **requests** (>=2.28.0): HTTP requests for DOI validation
+- **requests** (>=2.28.0): HTTP requests for Semantic Scholar API and DOI validation
+
+### Semantic Scholar API Key (Optional)
+
+The Semantic Scholar API can be used without authentication, but you may encounter rate limits or access restrictions. To get higher rate limits, you can obtain a free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api) and set it as an environment variable:
+
+```bash
+export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"
+```
+
+The tool will automatically use the API key if it's set in your environment.
 
 ## Usage
 
@@ -70,9 +79,9 @@ Save the diagnostic report to a text file instead of printing to terminal:
 python biblatex_diagnostics.py references.bib -r report.txt
 ```
 
-### Update with Google Scholar Data
+### Update with Semantic Scholar Data
 
-Automatically update entries with Google Scholar data and save to a new file:
+Automatically update entries with Semantic Scholar data and save to a new file:
 
 ```bash
 python biblatex_diagnostics.py references.bib --update-scholar -o corrected.bib
@@ -81,17 +90,17 @@ python biblatex_diagnostics.py references.bib --update-scholar -o corrected.bib
 ### Run Specific Diagnostics
 
 ```bash
-# Only check DOIs and unicode issues (skip Google Scholar)
+# Only check DOIs and unicode issues (skip Semantic Scholar)
 python biblatex_diagnostics.py references.bib --no-scholar
 
-# Only check Google Scholar matches
+# Only check Semantic Scholar matches
 python biblatex_diagnostics.py references.bib --no-doi --no-unicode --no-ampersand --no-special
 ```
 
 ### Advanced Options
 
 ```bash
-# Verbose output with custom delay between Google Scholar queries
+# Verbose output with custom delay between Semantic Scholar queries
 python biblatex_diagnostics.py references.bib -v --delay 3.0
 
 # Full help
@@ -107,7 +116,7 @@ python biblatex_diagnostics.py --help
 - `-o, --output`: Output file for corrected BibTeX
 - `-r, --report-file`: Save diagnostic report to file (default: print to terminal)
 - `-v, --verbose`: Enable verbose output
-- `--delay`: Delay between Google Scholar queries in seconds (default: 5.0)
+- `--delay`: Delay between Semantic Scholar queries in seconds (default: 5.0)
 
 ### Diagnostic Control
 
@@ -121,7 +130,7 @@ python biblatex_diagnostics.py --help
 - `--no-duplicates`: Skip duplicate entry detection
 
 **Character & Formatting Checks:**
-- `--no-scholar`: Skip Google Scholar checking
+- `--no-scholar`: Skip Semantic Scholar checking
 - `--no-doi`: Skip DOI validation
 - `--no-unicode`: Skip unicode character checking
 - `--no-ampersand`: Skip ampersand checking
@@ -130,7 +139,7 @@ python biblatex_diagnostics.py --help
 - `--no-names`: Skip name formatting checking
 
 ### Update Options
-- `--update-scholar`: Update entries with Google Scholar data (requires `-o`)
+- `--update-scholar`: Update entries with Semantic Scholar data (requires `-o`)
 
 ## Examples
 
@@ -144,7 +153,7 @@ This will check all ~700 entries for:
 - **Completeness**: Missing recommended fields, suspiciously bare entries
 - **Consistency**: Field naming (journal vs journaltitle), crossref validity
 - **Duplicates**: Fuzzy matching to find potential duplicates
-- **Google Scholar**: Cross-reference with authoritative sources
+- **Semantic Scholar**: Cross-reference with authoritative sources
 - **Character issues**: Unicode, accents, unescaped special characters
 - **Name formatting**: Author/editor parsing issues, inconsistent separators
 
@@ -154,8 +163,8 @@ python biblatex_diagnostics.py messy_refs.bib --update-scholar -o clean_refs.bib
 ```
 
 This will:
-- Search Google Scholar for each entry
-- Replace matching entries with Google Scholar's authoritative data
+- Search Semantic Scholar for each entry
+- Replace matching entries with Semantic Scholar's authoritative data
 - Use a 7-second delay between queries to avoid rate limiting
 - Save the corrected bibliography to `clean_refs.bib`
 
@@ -164,7 +173,7 @@ This will:
 python biblatex_diagnostics.py refs.bib --no-scholar --no-doi --no-ampersand --no-special
 ```
 
-Quickly check just for unicode issues without hitting Google Scholar.
+Quickly check just for unicode issues without hitting Semantic Scholar.
 
 ### Example 4: Save Report to File
 ```bash
@@ -192,7 +201,7 @@ Quickly check only for duplicate entries and broken crossrefs without running ot
 The tool provides detailed reports including:
 
 - **Issues Found**: Lists all problems detected (invalid DOIs, unicode characters, etc.)
-- **Potential Corrections**: Shows entries that match Google Scholar records
+- **Potential Corrections**: Shows entries that match Semantic Scholar records
 - **Summary Statistics**: Total entries checked, issues found, corrections available
 
 Example output:
@@ -201,7 +210,7 @@ Running diagnostics on 15 entries...
 ============================================================
 
 [1/15] Checking: einstein1905
-  ✓ Match found on Google Scholar
+  ✓ Match found on Semantic Scholar
   ✓ Valid DOI: 10.1002/andp.19053221004
 
 [2/15] Checking: smith2023ai
@@ -217,32 +226,33 @@ Found 2 issues:
   ⚠ Entry smith2023ai, field 'title': Contains em-dash ('—')
 
 Found 1 potential corrections:
-  ℹ einstein1905: Found matching entry on Google Scholar
+  ℹ einstein1905: Found matching entry on Semantic Scholar
 
 ============================================================
 ```
 
 ## How It Works
 
-1. **BibTeX Parsing**: Uses `bibtexparser` to load and parse your bibliography
-2. **Google Scholar Integration**: Uses the `scholarly` package to query Google Scholar by title
+1. **BibTeX Parsing**: Uses `pybtex` to load and parse your bibliography
+2. **Semantic Scholar Integration**: Uses the Semantic Scholar API to query papers by title
 3. **Title Matching**: Implements fuzzy matching (Jaccard similarity) to handle title variations
 4. **Data Validation**: Checks DOIs via HTTP requests, detects unicode patterns, validates LaTeX escaping
-5. **Ground Truth Replacement**: When matches are found, replaces entire entries with Google Scholar data
+5. **Ground Truth Replacement**: When matches are found, replaces entire entries with Semantic Scholar data
+6. **Rate Limiting**: Automatically handles API rate limits (429 errors) with exponential backoff
 
 ## Tips for Best Results
 
-- **Rate Limiting**: Google Scholar may block rapid queries. Increase `--delay` if you encounter issues (try 10+ seconds)
-- **Network Issues**: The tool requires internet access for Google Scholar and DOI validation
+- **Rate Limiting**: Semantic Scholar has API rate limits. The tool automatically handles 429 errors with exponential backoff
+- **Network Issues**: The tool requires internet access for Semantic Scholar API and DOI validation
 - **Large Files**: For 700+ entries, expect the full run to take significant time due to rate limiting
 - **Backup First**: Always keep a backup of your original .bib file before using `--update-scholar`
 
 ## Troubleshooting
 
-**Google Scholar blocking requests?**
-- Increase the delay: `--delay 10.0` or higher
-- Run diagnostics in smaller batches
-- Consider using a proxy (modify the scholarly configuration in the code)
+**Semantic Scholar rate limiting issues?**
+- The tool automatically retries with exponential backoff (2s, 4s, 8s)
+- Increase the delay between requests: `--delay 3.0` or higher
+- Run diagnostics in smaller batches if needed
 
 **"Title mismatch" warnings?**
 - The tool uses fuzzy matching, but may still miss some matches
