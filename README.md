@@ -11,6 +11,17 @@ A comprehensive Python tool for validating and correcting BibTeX/BibLaTeX files 
 - **Rate-Limited Queries**: Respects Google Scholar's rate limits with configurable delays
 
 ### Additional Diagnostics
+
+**Core Validation:**
+- **Entry Type Validation**: Ensures all required fields are present for each entry type (@article, @book, @inproceedings, etc.)
+- **Date/Year Validation**: Checks for impossible dates, future years, invalid months, and malformed date fields
+- **Identifier Validation**: Validates ISBN, ISSN, arXiv ID, and DOI formats; detects placeholder values (TBA, ???, etc.)
+- **Field Consistency**: Warns about old BibTeX conventions (use `journaltitle` instead of `journal` in biblatex)
+- **Completeness Checking**: Suggests recommended fields for scholarly completeness (volume, number, pages, publisher, etc.)
+- **Crossref Validation**: Verifies that crossref, xdata, and related fields point to existing entries
+- **Duplicate Detection**: Finds potential duplicate entries using fuzzy matching on author+title+year
+
+**Character & Formatting:**
 - **DOI Validation**: Checks DOI format and verifies that DOIs resolve correctly
 - **Unicode Character Detection**: Identifies problematic unicode characters like em-dashes (—), en-dashes (–), smart quotes, and ellipses
 - **Ampersand Checking**: Finds unescaped ampersands that should be `\&` in LaTeX
@@ -99,6 +110,17 @@ python biblatex_diagnostics.py --help
 - `--delay`: Delay between Google Scholar queries in seconds (default: 5.0)
 
 ### Diagnostic Control
+
+**Core Validation Checks:**
+- `--no-entry-types`: Skip entry type and required fields checking
+- `--no-dates`: Skip date/year validity checking
+- `--no-identifiers`: Skip ISBN/ISSN/arXiv format checking
+- `--no-consistency`: Skip field naming consistency checking
+- `--no-completeness`: Skip recommended fields checking
+- `--no-crossrefs`: Skip crossref/xdata/related validation
+- `--no-duplicates`: Skip duplicate entry detection
+
+**Character & Formatting Checks:**
 - `--no-scholar`: Skip Google Scholar checking
 - `--no-doi`: Skip DOI validation
 - `--no-unicode`: Skip unicode character checking
@@ -118,13 +140,13 @@ python biblatex_diagnostics.py my_references.bib -v
 ```
 
 This will check all ~700 entries for:
-- Matches on Google Scholar
-- Valid DOIs
-- Problematic unicode characters
-- Unescaped ampersands
-- Special character formatting issues
-- Accent formatting issues
-- Name formatting issues
+- **Core validation**: Entry types, required fields, date/year validity, ISBN/ISSN/arXiv formats
+- **Completeness**: Missing recommended fields, suspiciously bare entries
+- **Consistency**: Field naming (journal vs journaltitle), crossref validity
+- **Duplicates**: Fuzzy matching to find potential duplicates
+- **Google Scholar**: Cross-reference with authoritative sources
+- **Character issues**: Unicode, accents, unescaped special characters
+- **Name formatting**: Author/editor parsing issues, inconsistent separators
 
 ### Example 2: Clean and Correct References
 ```bash
@@ -151,12 +173,19 @@ python biblatex_diagnostics.py references.bib -r diagnostics_report.txt
 
 Run all diagnostics and save the warnings and errors to a text file for later review.
 
-### Example 5: Check Accent and Name Formatting Only
+### Example 5: Core Validation Only
 ```bash
-python biblatex_diagnostics.py references.bib --no-scholar --no-doi --no-unicode --no-ampersand --no-special
+python biblatex_diagnostics.py references.bib --no-scholar --no-doi --no-unicode --no-ampersand --no-special --no-accents --no-names
 ```
 
-Focus only on accent and name formatting issues without running other checks. Useful for cleaning up author names and special characters.
+Focus on core biblatex validation: entry types, required fields, dates, identifiers, completeness, crossrefs, and duplicates.
+
+### Example 6: Find Duplicates and Broken References
+```bash
+python biblatex_diagnostics.py references.bib --no-scholar --no-doi --no-unicode --no-ampersand --no-special --no-accents --no-names --no-entry-types --no-dates --no-identifiers --no-consistency --no-completeness
+```
+
+Quickly check only for duplicate entries and broken crossrefs without running other validations.
 
 ## Output
 

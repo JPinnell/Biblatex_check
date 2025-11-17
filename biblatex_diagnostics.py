@@ -9,8 +9,11 @@ import sys
 import time
 import argparse
 import requests
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 from pathlib import Path
+from datetime import datetime
+from collections import defaultdict
+from difflib import SequenceMatcher
 from pybtex.database import parse_file, BibliographyData, Entry
 from pybtex.database.output.bibtex import Writer
 
@@ -20,6 +23,84 @@ try:
 except ImportError:
     SCHOLARLY_AVAILABLE = False
     print("Warning: scholarly package not fully functional. Google Scholar features may be limited.")
+
+
+# Biblatex entry type specifications
+BIBLATEX_ENTRY_TYPES = {
+    'article': {
+        'required': ['author', 'title', 'journaltitle', 'year'],
+        'optional': ['translator', 'annotator', 'commentator', 'subtitle', 'titleaddon',
+                    'editor', 'editora', 'editorb', 'editorc', 'journalsubtitle', 'issuetitle',
+                    'issuesubtitle', 'language', 'origlanguage', 'series', 'volume', 'number',
+                    'eid', 'issue', 'month', 'pages', 'version', 'note', 'issn', 'addendum',
+                    'pubstate', 'doi', 'eprint', 'eprintclass', 'eprinttype', 'url', 'urldate']
+    },
+    'book': {
+        'required': ['author', 'title', 'year'],
+        'optional': ['editor', 'publisher', 'location', 'isbn', 'series', 'volume', 'edition',
+                    'chapter', 'pages', 'pagetotal', 'doi', 'url', 'urldate']
+    },
+    'inproceedings': {
+        'required': ['author', 'title', 'booktitle', 'year'],
+        'optional': ['editor', 'volume', 'number', 'series', 'pages', 'address', 'month',
+                    'organization', 'publisher', 'doi', 'url', 'urldate']
+    },
+    'proceedings': {
+        'required': ['title', 'year'],
+        'optional': ['editor', 'volume', 'number', 'series', 'address', 'month', 'publisher',
+                    'organization', 'doi', 'isbn', 'url', 'urldate']
+    },
+    'thesis': {
+        'required': ['author', 'title', 'type', 'institution', 'year'],
+        'optional': ['address', 'month', 'url', 'urldate', 'doi']
+    },
+    'phdthesis': {
+        'required': ['author', 'title', 'school', 'year'],
+        'optional': ['address', 'month', 'url', 'urldate', 'doi', 'type']
+    },
+    'mastersthesis': {
+        'required': ['author', 'title', 'school', 'year'],
+        'optional': ['address', 'month', 'url', 'urldate', 'doi', 'type']
+    },
+    'inbook': {
+        'required': ['author', 'title', 'booktitle', 'year'],
+        'optional': ['editor', 'volume', 'number', 'series', 'pages', 'address', 'publisher',
+                    'chapter', 'doi', 'url', 'urldate']
+    },
+    'incollection': {
+        'required': ['author', 'title', 'booktitle', 'year'],
+        'optional': ['editor', 'volume', 'number', 'series', 'type', 'chapter', 'pages',
+                    'address', 'edition', 'month', 'publisher', 'doi', 'url', 'urldate']
+    },
+    'online': {
+        'required': ['author', 'title', 'url', 'year'],
+        'optional': ['urldate', 'note', 'organization', 'date', 'month']
+    },
+    'misc': {
+        'required': [],  # misc can have any fields
+        'optional': ['author', 'title', 'howpublished', 'year', 'month', 'note', 'url', 'urldate']
+    },
+    'techreport': {
+        'required': ['author', 'title', 'institution', 'year'],
+        'optional': ['type', 'number', 'address', 'month', 'url', 'urldate', 'doi']
+    },
+    'unpublished': {
+        'required': ['author', 'title', 'note'],
+        'optional': ['year', 'month', 'url', 'urldate']
+    },
+    'manual': {
+        'required': ['title'],
+        'optional': ['author', 'organization', 'address', 'edition', 'month', 'year', 'url', 'urldate']
+    },
+}
+
+# Recommended fields for scholarly completeness
+RECOMMENDED_FIELDS = {
+    'article': ['volume', 'number', 'pages', 'doi'],
+    'book': ['publisher', 'location', 'isbn'],
+    'inproceedings': ['pages', 'publisher', 'doi'],
+    'online': ['urldate', 'organization'],
+}
 
 
 class BibTeXDiagnostics:
@@ -407,10 +488,321 @@ class BibTeXDiagnostics:
 
         return issues
 
+    def check_entry_type_fields(self, key: str, entry: Entry) -> List[str]:
+        """
+        Check if entry has all required fields for its type and warn about inappropriate fields.
+
+        Returns:
+            List of fields with issues
+        """
+        issues = []
+        entry_type = entry.type.lower()
+
+        # Check if entry type is known
+        if entry_type not in BIBLATEX_ENTRY_TYPES:
+            self.issues.append(
+                f"Entry {key}: Unknown entry type '@{entry_type}'"
+            )
+            return issues
+
+        spec = BIBLATEX_ENTRY_TYPES[entry_type]
+        entry_fields = set(entry.fields.keys())
+
+        # Also include author/editor from persons
+        if 'author' in entry.persons:
+            entry_fields.add('author')
+        if 'editor' in entry.persons:
+            entry_fields.add('editor')
+
+        # Check for missing required fields
+        required = set(spec['required'])
+        missing_fields = required - entry_fields
+
+        if missing_fields:
+            self.issues.append(
+                f"Entry {key} (@{entry_type}): Missing required fields: {', '.join(sorted(missing_fields))}"
+            )
+            issues.extend(missing_fields)
+
+        return issues
+
+    def check_date_validity(self, key: str, entry: Entry) -> bool:
+        """
+        Check if year/date fields are valid and sensible.
+
+        Returns:
+            True if valid, False otherwise
+        """
+        valid = True
+        current_year = datetime.now().year
+
+        # Check year field
+        if 'year' in entry.fields:
+            year_str = entry.fields['year'].strip()
+            try:
+                year = int(year_str)
+
+                # Check for impossible years
+                if year < 1000:
+                    self.issues.append(f"Entry {key}: Suspicious year '{year}' (before 1000)")
+                    valid = False
+                elif year > current_year + 5:
+                    self.issues.append(f"Entry {key}: Future year '{year}' (more than 5 years ahead)")
+                    valid = False
+            except ValueError:
+                self.issues.append(f"Entry {key}: Invalid year format '{year_str}'")
+                valid = False
+
+        # Check date field if present
+        if 'date' in entry.fields:
+            date_str = entry.fields['date'].strip()
+
+            # Check ISO format YYYY-MM-DD
+            date_pattern = r'^\d{4}-\d{2}-\d{2}$'
+            if re.match(date_pattern, date_str):
+                try:
+                    year, month, day = map(int, date_str.split('-'))
+
+                    if not (1 <= month <= 12):
+                        self.issues.append(f"Entry {key}: Invalid month in date '{date_str}'")
+                        valid = False
+                    elif not (1 <= day <= 31):
+                        self.issues.append(f"Entry {key}: Invalid day in date '{date_str}'")
+                        valid = False
+                    elif year > current_year + 5:
+                        self.issues.append(f"Entry {key}: Future date '{date_str}'")
+                        valid = False
+                except ValueError:
+                    self.issues.append(f"Entry {key}: Invalid date format '{date_str}'")
+                    valid = False
+
+        # Check month field
+        if 'month' in entry.fields:
+            month = entry.fields['month'].strip().lower()
+            valid_months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                          'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+                          'january', 'february', 'march', 'april', 'may', 'june',
+                          'july', 'august', 'september', 'october', 'november', 'december']
+
+            # Check if it's a number
+            if month.isdigit():
+                month_num = int(month)
+                if not (1 <= month_num <= 12):
+                    self.issues.append(f"Entry {key}: Invalid month number '{month}'")
+                    valid = False
+            elif month not in valid_months:
+                self.issues.append(f"Entry {key}: Invalid month '{month}'")
+                valid = False
+
+        return valid
+
+    def check_identifier_formats(self, key: str, entry: Entry) -> List[str]:
+        """
+        Validate ISBN, ISSN, arXiv, and other identifier formats.
+
+        Returns:
+            List of fields with invalid identifiers
+        """
+        issues = []
+
+        # Check ISBN
+        if 'isbn' in entry.fields:
+            isbn = re.sub(r'[-\s]', '', entry.fields['isbn'])
+
+            # ISBN-10 or ISBN-13
+            if not (len(isbn) == 10 or len(isbn) == 13):
+                self.issues.append(f"Entry {key}: Invalid ISBN length '{entry.fields['isbn']}'")
+                issues.append('isbn')
+            elif not isbn.replace('X', '').replace('x', '').isdigit():
+                self.issues.append(f"Entry {key}: Invalid ISBN format '{entry.fields['isbn']}'")
+                issues.append('isbn')
+
+        # Check ISSN (format: XXXX-XXXX)
+        if 'issn' in entry.fields:
+            issn = entry.fields['issn'].strip()
+            issn_pattern = r'^\d{4}-\d{3}[\dXx]$'
+
+            if not re.match(issn_pattern, issn):
+                self.issues.append(f"Entry {key}: Invalid ISSN format '{issn}' (should be XXXX-XXXX)")
+                issues.append('issn')
+
+        # Check arXiv ID
+        if 'eprint' in entry.fields and entry.fields.get('eprinttype', '').lower() == 'arxiv':
+            arxiv_id = entry.fields['eprint'].strip()
+
+            # Old format: arch-ive/YYMMNNN or New format: YYMM.NNNNN
+            old_pattern = r'^[a-z\-]+/\d{7}$'
+            new_pattern = r'^\d{4}\.\d{4,5}$'
+
+            if not (re.match(old_pattern, arxiv_id) or re.match(new_pattern, arxiv_id)):
+                self.issues.append(f"Entry {key}: Invalid arXiv ID format '{arxiv_id}'")
+                issues.append('eprint')
+
+        # Check for placeholder values
+        placeholder_patterns = ['tba', 'tbd', '??', 'xxx', 'pending']
+        for field in ['doi', 'url', 'isbn', 'issn']:
+            if field in entry.fields:
+                value = entry.fields[field].lower().strip()
+                if any(p in value for p in placeholder_patterns):
+                    self.issues.append(f"Entry {key}: Placeholder value in {field}: '{entry.fields[field]}'")
+                    issues.append(field)
+
+        return issues
+
+    def check_field_consistency(self, key: str, entry: Entry) -> List[str]:
+        """
+        Check for field naming consistency (biblatex vs bibtex conventions).
+
+        Returns:
+            List of fields with consistency issues
+        """
+        issues = []
+
+        # Check for old BibTeX fields that should be updated in biblatex
+        old_to_new = {
+            'journal': 'journaltitle',
+            'school': 'institution',
+            'address': 'location',
+        }
+
+        for old_field, new_field in old_to_new.items():
+            if old_field in entry.fields:
+                entry_type = entry.type.lower()
+                # Only warn for entry types where this matters
+                if entry_type in ['article', 'phdthesis', 'mastersthesis']:
+                    self.issues.append(
+                        f"Entry {key}: Use '{new_field}' instead of '{old_field}' in biblatex"
+                    )
+                    issues.append(old_field)
+
+        return issues
+
+    def check_completeness(self, key: str, entry: Entry) -> List[str]:
+        """
+        Check if recommended fields are missing for scholarly completeness.
+
+        Returns:
+            List of missing recommended fields
+        """
+        issues = []
+        entry_type = entry.type.lower()
+
+        if entry_type not in RECOMMENDED_FIELDS:
+            return issues
+
+        recommended = RECOMMENDED_FIELDS[entry_type]
+        entry_fields = set(entry.fields.keys())
+        missing = [f for f in recommended if f not in entry_fields]
+
+        if missing:
+            self.issues.append(
+                f"Entry {key} (@{entry_type}): Missing recommended fields for completeness: {', '.join(missing)}"
+            )
+            issues.extend(missing)
+
+        # Check for suspiciously bare entries
+        essential_count = len(entry_fields.intersection({'author', 'title', 'year', 'journal', 'journaltitle', 'booktitle'}))
+        if essential_count < 3 and entry_type != 'misc':
+            self.issues.append(
+                f"Entry {key}: Suspiciously bare entry (only {len(entry_fields)} fields)"
+            )
+
+        return issues
+
+    def check_crossrefs(self, bib_data: BibliographyData) -> Dict[str, List[str]]:
+        """
+        Validate crossref, xdata, and related fields point to existing entries.
+
+        Returns:
+            Dictionary mapping entry keys to lists of broken references
+        """
+        all_keys = set(bib_data.entries.keys())
+        broken_refs = {}
+
+        for key, entry in bib_data.entries.items():
+            broken = []
+
+            # Check crossref
+            if 'crossref' in entry.fields:
+                ref_key = entry.fields['crossref']
+                if ref_key not in all_keys:
+                    self.issues.append(
+                        f"Entry {key}: Broken crossref to '{ref_key}' (entry does not exist)"
+                    )
+                    broken.append(ref_key)
+
+            # Check xdata
+            if 'xdata' in entry.fields:
+                xdata_keys = entry.fields['xdata'].split(',')
+                for xdata_key in xdata_keys:
+                    xdata_key = xdata_key.strip()
+                    if xdata_key not in all_keys:
+                        self.issues.append(
+                            f"Entry {key}: Broken xdata reference to '{xdata_key}' (entry does not exist)"
+                        )
+                        broken.append(xdata_key)
+
+            # Check related
+            if 'related' in entry.fields:
+                related_keys = entry.fields['related'].split(',')
+                for related_key in related_keys:
+                    related_key = related_key.strip()
+                    if related_key not in all_keys:
+                        self.issues.append(
+                            f"Entry {key}: Broken related reference to '{related_key}' (entry does not exist)"
+                        )
+                        broken.append(related_key)
+
+            if broken:
+                broken_refs[key] = broken
+
+        return broken_refs
+
+    def find_duplicates(self, bib_data: BibliographyData, threshold: float = 0.8) -> List[Tuple[str, str, float]]:
+        """
+        Find potential duplicate entries using fuzzy matching on author+title+year.
+
+        Args:
+            bib_data: Bibliography database
+            threshold: Similarity threshold (0.0 to 1.0)
+
+        Returns:
+            List of tuples (key1, key2, similarity_score)
+        """
+        duplicates = []
+        entries_list = list(bib_data.entries.items())
+
+        for i, (key1, entry1) in enumerate(entries_list):
+            for key2, entry2 in entries_list[i+1:]:
+                # Create fingerprints
+                def make_fingerprint(entry):
+                    authors = ' '.join([str(p) for p in entry.persons.get('author', [])])
+                    title = entry.fields.get('title', '').lower()
+                    year = entry.fields.get('year', '')
+                    return f"{authors} {title} {year}".lower()
+
+                fp1 = make_fingerprint(entry1)
+                fp2 = make_fingerprint(entry2)
+
+                # Calculate similarity
+                similarity = SequenceMatcher(None, fp1, fp2).ratio()
+
+                if similarity >= threshold:
+                    duplicates.append((key1, key2, similarity))
+                    self.issues.append(
+                        f"Possible duplicate: '{key1}' and '{key2}' ({similarity:.0%} similar)"
+                    )
+
+        return duplicates
+
     def run_diagnostics(self, bib_data: BibliographyData, check_scholar: bool = True,
                        check_doi: bool = True, check_unicode: bool = True,
                        check_ampersand: bool = True, check_special: bool = True,
-                       check_accents: bool = True, check_names: bool = True) -> None:
+                       check_accents: bool = True, check_names: bool = True,
+                       check_entry_types: bool = True, check_dates: bool = True,
+                       check_identifiers: bool = True, check_consistency: bool = True,
+                       check_completeness_flag: bool = True, check_crossrefs_flag: bool = True,
+                       check_duplicates: bool = True) -> None:
         """
         Run all selected diagnostics on the BibTeX database.
 
@@ -423,13 +815,43 @@ class BibTeXDiagnostics:
             check_special: Check for special character issues
             check_accents: Check for accent formatting issues
             check_names: Check for name formatting issues
+            check_entry_types: Check entry types have required fields
+            check_dates: Check date validity
+            check_identifiers: Check ISBN/ISSN/arXiv formats
+            check_consistency: Check field naming consistency
+            check_completeness_flag: Check for recommended fields
+            check_crossrefs_flag: Check crossref/xdata/related validity
+            check_duplicates: Find potential duplicate entries
         """
         total_entries = len(bib_data.entries)
         print(f"\nRunning diagnostics on {total_entries} entries...")
         print("=" * 60)
 
+        # Run cross-entry checks first
+        if check_crossrefs_flag:
+            self.check_crossrefs(bib_data)
+
+        if check_duplicates:
+            self.find_duplicates(bib_data)
+
+        # Run per-entry checks
         for idx, (key, entry) in enumerate(bib_data.entries.items(), 1):
             print(f"\n[{idx}/{total_entries}] Checking: {key}")
+
+            if check_entry_types:
+                self.check_entry_type_fields(key, entry)
+
+            if check_dates:
+                self.check_date_validity(key, entry)
+
+            if check_identifiers:
+                self.check_identifier_formats(key, entry)
+
+            if check_consistency:
+                self.check_field_consistency(key, entry)
+
+            if check_completeness_flag:
+                self.check_completeness(key, entry)
 
             if check_scholar and SCHOLARLY_AVAILABLE:
                 self.check_google_scholar(key, entry, update=False)
@@ -563,6 +985,20 @@ Examples:
                        help='Skip accent formatting checking')
     parser.add_argument('--no-names', action='store_true',
                        help='Skip name formatting checking')
+    parser.add_argument('--no-entry-types', action='store_true',
+                       help='Skip entry type and required fields checking')
+    parser.add_argument('--no-dates', action='store_true',
+                       help='Skip date/year validity checking')
+    parser.add_argument('--no-identifiers', action='store_true',
+                       help='Skip ISBN/ISSN/arXiv format checking')
+    parser.add_argument('--no-consistency', action='store_true',
+                       help='Skip field naming consistency checking')
+    parser.add_argument('--no-completeness', action='store_true',
+                       help='Skip recommended fields checking')
+    parser.add_argument('--no-crossrefs', action='store_true',
+                       help='Skip crossref/xdata/related validation')
+    parser.add_argument('--no-duplicates', action='store_true',
+                       help='Skip duplicate entry detection')
 
     # Update options
     parser.add_argument('--update-scholar', action='store_true',
@@ -596,7 +1032,14 @@ Examples:
                 check_ampersand=not args.no_ampersand,
                 check_special=not args.no_special,
                 check_accents=not args.no_accents,
-                check_names=not args.no_names
+                check_names=not args.no_names,
+                check_entry_types=not args.no_entry_types,
+                check_dates=not args.no_dates,
+                check_identifiers=not args.no_identifiers,
+                check_consistency=not args.no_consistency,
+                check_completeness_flag=not args.no_completeness,
+                check_crossrefs_flag=not args.no_crossrefs,
+                check_duplicates=not args.no_duplicates
             )
 
         # Generate and output report
