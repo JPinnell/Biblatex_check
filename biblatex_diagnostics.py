@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BibTeX Diagnostic Tool
-A comprehensive tool for validating and correcting BibTeX entries using Semantic Scholar as ground truth.
+A comprehensive tool for validating and correcting BibTeX entries using Crossref and Semantic Scholar as ground truth.
 """
 
 import re
@@ -18,7 +18,12 @@ from difflib import SequenceMatcher
 from pybtex.database import parse_file, BibliographyData, Entry
 from pybtex.database.output.bibtex import Writer
 
-# Semantic Scholar API endpoint
+# Crossref API endpoint (primary)
+CROSSREF_API_BASE = "https://api.crossref.org"
+CROSSREF_AVAILABLE = True
+MAILTO_EMAIL = os.environ.get('CROSSREF_MAILTO', 'research@example.com')  # For polite pool
+
+# Semantic Scholar API endpoint (fallback)
 SEMANTIC_SCHOLAR_API_BASE = "https://api.semanticscholar.org/graph/v1"
 SEMANTIC_SCHOLAR_AVAILABLE = True  # API is always available, just needs rate limiting
 SEMANTIC_SCHOLAR_API_KEY = os.environ.get('SEMANTIC_SCHOLAR_API_KEY', None)
@@ -105,13 +110,14 @@ RECOMMENDED_FIELDS = {
 class BibTeXDiagnostics:
     """Main diagnostic class for BibTeX file validation and correction."""
 
-    def __init__(self, verbose: bool = False, delay: float = 5.0):
+    def __init__(self, verbose: bool = False, delay: float = 0.05):
         """
         Initialize the diagnostic tool.
 
         Args:
             verbose: Enable verbose output
-            delay: Delay between Semantic Scholar API queries (seconds) to avoid rate limiting
+            delay: Delay between API queries (seconds) to avoid rate limiting
+                   Default: 0.05s for Crossref (20 req/sec), 1.0s for Semantic Scholar with API key
         """
         self.verbose = verbose
         self.delay = delay
@@ -135,6 +141,102 @@ class BibTeXDiagnostics:
         writer = Writer()
         writer.write_file(bib_data, filepath)
         self.log(f"Saved corrected BibTeX to: {filepath}")
+
+    def check_crossref(self, key: str, entry: Entry, update: bool = False) -> Optional[Entry]:
+        """
+        Check entry against Crossref and optionally update it.
+
+        Args:
+            key: BibTeX entry key
+            entry: BibTeX entry
+            update: If True, return the Crossref entry for updating
+
+        Returns:
+            Crossref entry if found and update=True, otherwise None
+        """
+        if not CROSSREF_AVAILABLE:
+            return None
+
+        title = entry.fields.get('title', '').strip('{}').strip()
+        if not title:
+            self.issues.append(f"Entry {key} has no title")
+            return None
+
+        self.log(f"Searching Crossref for: {title}")
+
+        max_retries = 3
+        retry_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                # Search for the paper by title using Crossref API
+                search_url = f"{CROSSREF_API_BASE}/works"
+                params = {
+                    'query.title': title,
+                    'rows': 1,
+                    'select': 'DOI,title,author,published,container-title,volume,issue,page,publisher,ISBN,ISSN,type'
+                }
+
+                # Add polite pool headers
+                headers = {
+                    'User-Agent': f'biblatex-diagnostics/1.0 (mailto:{MAILTO_EMAIL})'
+                }
+
+                response = requests.get(search_url, params=params, headers=headers, timeout=10)
+
+                # Handle rate limiting
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        self.log(f"Rate limited, waiting {retry_delay} seconds before retry...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        self.issues.append(f"Entry {key}: Crossref rate limit exceeded")
+                        return None
+
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get('message') and data['message'].get('items') and len(data['message']['items']) > 0:
+                    result = data['message']['items'][0]
+
+                    # Check if titles match (allowing for some variation)
+                    crossref_title = ''.join(result.get('title', [''])).lower()
+                    entry_title = title.lower()
+
+                    # Simple similarity check
+                    if self._titles_match(entry_title, crossref_title):
+                        self.log(f"✓ Match found on Crossref: {crossref_title}")
+
+                        if update:
+                            # Convert to BibTeX format
+                            crossref_entry = self._crossref_to_entry(result, key, entry.type)
+                            return crossref_entry
+                        else:
+                            # Just report the match
+                            self.corrections.append({
+                                'entry_id': key,
+                                'type': 'crossref_match',
+                                'message': f"Found matching entry on Crossref",
+                                'crossref_data': result
+                            })
+                    else:
+                        self.log(f"Title mismatch - '{title}' vs '{crossref_title}'")
+                else:
+                    self.log(f"Not found on Crossref")
+
+                break  # Success, exit retry loop
+
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    self.log(f"Request error, retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    self.log(f"Crossref error - {str(e)}")
+
+        return None
 
     def check_semantic_scholar(self, key: str, entry: Entry, update: bool = False) -> Optional[Entry]:
         """
@@ -253,6 +355,84 @@ class BibTeXDiagnostics:
         similarity = intersection / union if union > 0 else 0
 
         return similarity > 0.7  # 70% similarity threshold
+
+    def _crossref_to_entry(self, crossref_result: Dict, entry_key: str, entry_type: str) -> Entry:
+        """Convert Crossref result to pybtex Entry format."""
+        from pybtex.database import Person
+
+        # Determine entry type from Crossref type
+        cr_type = crossref_result.get('type', '').lower()
+        type_mapping = {
+            'journal-article': 'article',
+            'proceedings-article': 'inproceedings',
+            'book-chapter': 'incollection',
+            'book': 'book',
+            'monograph': 'book',
+            'dissertation': 'phdthesis',
+            'report': 'techreport',
+        }
+        etype = type_mapping.get(cr_type, entry_type or 'article')
+
+        # Create fields dict
+        title = ''.join(crossref_result.get('title', []))
+        fields = {
+            'title': '{' + title + '}',
+        }
+
+        # Add year from published date
+        published = crossref_result.get('published', {}) or crossref_result.get('published-print', {})
+        if published and 'date-parts' in published and published['date-parts']:
+            date_parts = published['date-parts'][0]
+            if date_parts and len(date_parts) > 0:
+                fields['year'] = str(date_parts[0])
+
+        # Add container title (journal/booktitle)
+        container_title = crossref_result.get('container-title', [])
+        if container_title:
+            container = container_title[0] if isinstance(container_title, list) else container_title
+            if etype == 'article':
+                fields['journaltitle'] = container
+            elif etype in ['inproceedings', 'incollection']:
+                fields['booktitle'] = container
+
+        # Add volume, issue, pages
+        if 'volume' in crossref_result:
+            fields['volume'] = str(crossref_result['volume'])
+        if 'issue' in crossref_result:
+            fields['number'] = str(crossref_result['issue'])
+        if 'page' in crossref_result:
+            fields['pages'] = crossref_result['page']
+
+        # Add publisher
+        if 'publisher' in crossref_result:
+            fields['publisher'] = crossref_result['publisher']
+
+        # Add DOI
+        if 'DOI' in crossref_result:
+            fields['doi'] = crossref_result['DOI']
+
+        # Add ISBN/ISSN
+        if 'ISBN' in crossref_result and crossref_result['ISBN']:
+            fields['isbn'] = crossref_result['ISBN'][0] if isinstance(crossref_result['ISBN'], list) else crossref_result['ISBN']
+        if 'ISSN' in crossref_result and crossref_result['ISSN']:
+            fields['issn'] = crossref_result['ISSN'][0] if isinstance(crossref_result['ISSN'], list) else crossref_result['ISSN']
+
+        # Handle authors
+        persons = {}
+        if 'author' in crossref_result and crossref_result['author']:
+            author_list = []
+            for author in crossref_result['author']:
+                # Crossref provides given and family names separately
+                given = author.get('given', '')
+                family = author.get('family', '')
+                if given and family:
+                    author_list.append(Person(f"{given} {family}"))
+                elif family:
+                    author_list.append(Person(family))
+            if author_list:
+                persons['author'] = author_list
+
+        return Entry(etype, fields=fields, persons=persons)
 
     def _semantic_scholar_to_entry(self, ss_result: Dict, entry_key: str, entry_type: str) -> Entry:
         """Convert Semantic Scholar result to pybtex Entry format."""
@@ -902,9 +1082,19 @@ class BibTeXDiagnostics:
             if check_completeness_flag:
                 self.check_completeness(key, entry)
 
-            if check_scholar and SEMANTIC_SCHOLAR_AVAILABLE:
-                self.check_semantic_scholar(key, entry, update=False)
-                time.sleep(self.delay)  # Rate limiting
+            if check_scholar:
+                # Try Crossref first (faster, higher rate limit)
+                crossref_found = False
+                if CROSSREF_AVAILABLE:
+                    result = self.check_crossref(key, entry, update=False)
+                    if result is not None or any(c['entry_id'] == key and c['type'] == 'crossref_match' for c in self.corrections):
+                        crossref_found = True
+                    time.sleep(self.delay)  # Rate limiting (0.05s for 20 req/sec)
+
+                # Fallback to Semantic Scholar if Crossref didn't find a match
+                if not crossref_found and SEMANTIC_SCHOLAR_AVAILABLE:
+                    self.check_semantic_scholar(key, entry, update=False)
+                    time.sleep(1.0 if SEMANTIC_SCHOLAR_API_KEY else 5.0)  # Different rate limits
 
             if check_doi:
                 self.validate_doi(key, entry)
@@ -924,9 +1114,9 @@ class BibTeXDiagnostics:
             if check_names:
                 self.check_name_formatting(key, entry)
 
-    def fix_with_semantic_scholar(self, bib_data: BibliographyData) -> BibliographyData:
+    def fix_with_apis(self, bib_data: BibliographyData) -> BibliographyData:
         """
-        Update BibTeX entries with Semantic Scholar data where matches are found.
+        Update BibTeX entries with Crossref/Semantic Scholar data where matches are found.
 
         Args:
             bib_data: The BibTeX database to update
@@ -934,33 +1124,49 @@ class BibTeXDiagnostics:
         Returns:
             Updated BibTeX database
         """
-        if not SEMANTIC_SCHOLAR_AVAILABLE:
-            print("Error: Semantic Scholar API not available. Cannot update entries.")
+        if not CROSSREF_AVAILABLE and not SEMANTIC_SCHOLAR_AVAILABLE:
+            print("Error: No APIs available. Cannot update entries.")
             return bib_data
 
         total_entries = len(bib_data.entries)
-        print(f"\nUpdating {total_entries} entries with Semantic Scholar data...")
+        print(f"\nUpdating {total_entries} entries with API data (Crossref → Semantic Scholar fallback)...")
         print("=" * 60)
 
         updated_count = 0
+        crossref_count = 0
+        semantic_scholar_count = 0
 
         for idx, (key, entry) in enumerate(list(bib_data.entries.items()), 1):
             print(f"\n[{idx}/{total_entries}] Processing: {key}")
 
-            ss_entry = self.check_semantic_scholar(key, entry, update=True)
+            # Try Crossref first (faster, better bibliographic data)
+            updated_entry = None
+            if CROSSREF_AVAILABLE:
+                updated_entry = self.check_crossref(key, entry, update=True)
+                if updated_entry:
+                    crossref_count += 1
+                    print(f"  ✓ Updated with Crossref data")
+                time.sleep(self.delay)  # Rate limiting
 
-            if ss_entry:
-                # Update entry with Semantic Scholar data
-                bib_data.entries[key] = ss_entry
+            # Fallback to Semantic Scholar if Crossref didn't work
+            if not updated_entry and SEMANTIC_SCHOLAR_AVAILABLE:
+                updated_entry = self.check_semantic_scholar(key, entry, update=True)
+                if updated_entry:
+                    semantic_scholar_count += 1
+                    print(f"  ✓ Updated with Semantic Scholar data")
+                time.sleep(1.0 if SEMANTIC_SCHOLAR_API_KEY else 5.0)  # Different rate limits
+
+            if updated_entry:
+                # Update entry with API data
+                bib_data.entries[key] = updated_entry
                 updated_count += 1
-                print(f"  ✓ Updated with Semantic Scholar data")
             else:
                 print(f"  ✗ No update available")
 
-            time.sleep(self.delay)  # Rate limiting
-
         print(f"\n{'=' * 60}")
         print(f"Updated {updated_count}/{total_entries} entries")
+        print(f"  - Crossref: {crossref_count}")
+        print(f"  - Semantic Scholar: {semantic_scholar_count}")
 
         return bib_data
 
@@ -991,7 +1197,7 @@ class BibTeXDiagnostics:
 def main():
     """Main entry point for the diagnostic tool."""
     parser = argparse.ArgumentParser(
-        description='BibTeX Diagnostic Tool - Validate and correct BibTeX entries using Semantic Scholar',
+        description='BibTeX Diagnostic Tool - Validate and correct BibTeX entries using Crossref and Semantic Scholar',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1001,14 +1207,14 @@ Examples:
   # Save diagnostic report to file
   python biblatex_diagnostics.py input.bib -r report.txt
 
-  # Update entries with Semantic Scholar data
+  # Update entries with API data (Crossref → Semantic Scholar fallback)
   python biblatex_diagnostics.py input.bib --update-scholar -o corrected.bib
 
   # Run specific diagnostics only
   python biblatex_diagnostics.py input.bib --no-scholar
 
   # Verbose output with custom delay and save report
-  python biblatex_diagnostics.py input.bib -v --delay 3.0 -r diagnostics.txt
+  python biblatex_diagnostics.py input.bib -v --delay 0.05 -r diagnostics.txt
         """
     )
 
@@ -1016,14 +1222,14 @@ Examples:
     parser.add_argument('-o', '--output', help='Output file for corrected BibTeX')
     parser.add_argument('-r', '--report-file', help='Save diagnostic report to file (default: print to terminal)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    # Default delay: 1.0 second with API key (1 req/sec limit), 5.0 seconds without
-    default_delay = 1.0 if SEMANTIC_SCHOLAR_API_KEY else 5.0
+    # Default delay: 0.05s for Crossref (20 req/sec)
+    default_delay = 0.05
     parser.add_argument('--delay', type=float, default=default_delay,
-                       help=f'Delay between Semantic Scholar API queries (default: {default_delay} seconds)')
+                       help=f'Delay between Crossref API queries (default: {default_delay}s for 20 req/sec)')
 
     # Diagnostic options
     parser.add_argument('--no-scholar', action='store_true',
-                       help='Skip Semantic Scholar checking')
+                       help='Skip API checking (Crossref and Semantic Scholar)')
     parser.add_argument('--no-doi', action='store_true',
                        help='Skip DOI validation')
     parser.add_argument('--no-unicode', action='store_true',
@@ -1053,7 +1259,7 @@ Examples:
 
     # Update options
     parser.add_argument('--update-scholar', action='store_true',
-                       help='Update entries with Semantic Scholar data (requires -o)')
+                       help='Update entries with API data: Crossref (primary) → Semantic Scholar (fallback) (requires -o)')
 
     args = parser.parse_args()
 
@@ -1070,7 +1276,7 @@ Examples:
 
         if args.update_scholar:
             # Update mode
-            bib_data = diagnostics.fix_with_semantic_scholar(bib_data)
+            bib_data = diagnostics.fix_with_apis(bib_data)
             diagnostics.save_bibtex(bib_data, args.output)
             print(f"\n✓ Corrected BibTeX saved to: {args.output}")
         else:

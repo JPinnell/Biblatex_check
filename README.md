@@ -1,11 +1,12 @@
 # BibTeX Diagnostic Tool
 
-A comprehensive Python tool for validating and correcting BibTeX/BibLaTeX files using Semantic Scholar as the ground truth. Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
+A comprehensive Python tool for validating and correcting BibTeX/BibLaTeX files using Crossref and Semantic Scholar as the ground truth. Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
 
 ## Features
 
-### Main Feature: Semantic Scholar Validation
-- **Cross-reference with Semantic Scholar**: Automatically checks each entry's title against Semantic Scholar API
+### Main Feature: Crossref + Semantic Scholar Validation
+- **Primary: Crossref API**: Fast, high-rate-limit bibliographic database (20 requests/sec)
+- **Fallback: Semantic Scholar**: Academic paper database when Crossref doesn't find a match
 - **Ground Truth Replacement**: If a matching title is found, pulls the authoritative BibTeX entry
 - **Smart Title Matching**: Uses fuzzy matching to handle variations in punctuation and formatting
 - **Rate-Limited Queries**: Handles API rate limits (429 errors) with automatic retry and exponential backoff
@@ -51,23 +52,22 @@ pip install pybtex requests
 - **pybtex** (>=0.24.0): BibTeX file parsing and writing
 - **requests** (>=2.28.0): HTTP requests for Semantic Scholar API and DOI validation
 
-### Semantic Scholar API Key (Recommended)
+### API Configuration (Optional)
 
-The Semantic Scholar API can be used without authentication, but you may encounter rate limits or access restrictions. **With an API key, you get 1 request per second** (vs slower unauthenticated access).
+**Crossref Polite Pool (Recommended):**
 
-To get a free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api):
+Crossref offers a "polite pool" with higher rate limits when you identify yourself. Set your email:
 
-**Quick Setup (using the provided script):**
 ```bash
-# Copy the template and edit it with your API key
-cp setup_api_key.sh.template setup_api_key.sh
-nano setup_api_key.sh  # Edit and replace YOUR_API_KEY_HERE with your actual key
-
-# Source it for the current session
-source setup_api_key.sh
+export CROSSREF_MAILTO="your-email@example.com"
 ```
 
-**Manual Setup:**
+This gives you access to the polite pool with better performance. The tool already uses 20 requests/sec by default.
+
+**Semantic Scholar API Key (Optional):**
+
+The Semantic Scholar API is used as a fallback. An API key provides better access:
+
 ```bash
 # Set for current session
 export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"
@@ -77,10 +77,7 @@ echo 'export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-**Benefits with API key:**
-- Default delay automatically adjusts to 1 second (vs 5 seconds without key)
-- More reliable access with higher rate limits
-- Faster processing of large bibliography files
+Get a free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api).
 
 ## Usage
 
@@ -100,29 +97,34 @@ Save the diagnostic report to a text file instead of printing to terminal:
 python biblatex_diagnostics.py references.bib -r report.txt
 ```
 
-### Update with Semantic Scholar Data
+### Update with API Data
 
-Automatically update entries with Semantic Scholar data and save to a new file:
+Automatically update entries with Crossref/Semantic Scholar data and save to a new file:
 
 ```bash
 python biblatex_diagnostics.py references.bib --update-scholar -o corrected.bib
 ```
 
+This will:
+1. Try Crossref first (fast, comprehensive bibliographic data)
+2. Fall back to Semantic Scholar if Crossref doesn't find a match
+3. Update entries with authoritative data
+
 ### Run Specific Diagnostics
 
 ```bash
-# Only check DOIs and unicode issues (skip Semantic Scholar)
+# Only check DOIs and unicode issues (skip API lookups)
 python biblatex_diagnostics.py references.bib --no-scholar
 
-# Only check Semantic Scholar matches
+# Only check API matches
 python biblatex_diagnostics.py references.bib --no-doi --no-unicode --no-ampersand --no-special
 ```
 
 ### Advanced Options
 
 ```bash
-# Verbose output with custom delay between Semantic Scholar queries
-python biblatex_diagnostics.py references.bib -v --delay 3.0
+# Verbose output with custom delay between API queries
+python biblatex_diagnostics.py references.bib -v --delay 0.05
 
 # Full help
 python biblatex_diagnostics.py --help
@@ -137,7 +139,7 @@ python biblatex_diagnostics.py --help
 - `-o, --output`: Output file for corrected BibTeX
 - `-r, --report-file`: Save diagnostic report to file (default: print to terminal)
 - `-v, --verbose`: Enable verbose output
-- `--delay`: Delay between Semantic Scholar queries in seconds (default: 5.0)
+- `--delay`: Delay between Crossref API queries in seconds (default: 0.05s for 20 req/sec)
 
 ### Diagnostic Control
 
@@ -151,7 +153,7 @@ python biblatex_diagnostics.py --help
 - `--no-duplicates`: Skip duplicate entry detection
 
 **Character & Formatting Checks:**
-- `--no-scholar`: Skip Semantic Scholar checking
+- `--no-scholar`: Skip API checking (Crossref and Semantic Scholar)
 - `--no-doi`: Skip DOI validation
 - `--no-unicode`: Skip unicode character checking
 - `--no-ampersand`: Skip ampersand checking
@@ -160,7 +162,7 @@ python biblatex_diagnostics.py --help
 - `--no-names`: Skip name formatting checking
 
 ### Update Options
-- `--update-scholar`: Update entries with Semantic Scholar data (requires `-o`)
+- `--update-scholar`: Update entries with API data: Crossref (primary) → Semantic Scholar (fallback) (requires `-o`)
 
 ## Examples
 
@@ -174,19 +176,19 @@ This will check all ~700 entries for:
 - **Completeness**: Missing recommended fields, suspiciously bare entries
 - **Consistency**: Field naming (journal vs journaltitle), crossref validity
 - **Duplicates**: Fuzzy matching to find potential duplicates
-- **Semantic Scholar**: Cross-reference with authoritative sources
+- **API Validation**: Cross-reference with Crossref and Semantic Scholar
 - **Character issues**: Unicode, accents, unescaped special characters
 - **Name formatting**: Author/editor parsing issues, inconsistent separators
 
 ### Example 2: Clean and Correct References
 ```bash
-python biblatex_diagnostics.py messy_refs.bib --update-scholar -o clean_refs.bib --delay 7.0
+python biblatex_diagnostics.py messy_refs.bib --update-scholar -o clean_refs.bib
 ```
 
 This will:
-- Search Semantic Scholar for each entry
-- Replace matching entries with Semantic Scholar's authoritative data
-- Use a 7-second delay between queries to avoid rate limiting
+- Search Crossref for each entry (fast, 20 req/sec)
+- Fall back to Semantic Scholar if Crossref doesn't find a match
+- Replace matching entries with authoritative data
 - Save the corrected bibliography to `clean_refs.bib`
 
 ### Example 3: Quick Unicode Check
@@ -194,7 +196,7 @@ This will:
 python biblatex_diagnostics.py refs.bib --no-scholar --no-doi --no-ampersand --no-special
 ```
 
-Quickly check just for unicode issues without hitting Semantic Scholar.
+Quickly check just for unicode issues without API lookups.
 
 ### Example 4: Save Report to File
 ```bash
@@ -222,7 +224,7 @@ Quickly check only for duplicate entries and broken crossrefs without running ot
 The tool provides detailed reports including:
 
 - **Issues Found**: Lists all problems detected (invalid DOIs, unicode characters, etc.)
-- **Potential Corrections**: Shows entries that match Semantic Scholar records
+- **Potential Corrections**: Shows entries that match Crossref/Semantic Scholar records
 - **Summary Statistics**: Total entries checked, issues found, corrections available
 
 Example output:
@@ -231,7 +233,7 @@ Running diagnostics on 15 entries...
 ============================================================
 
 [1/15] Checking: einstein1905
-  ✓ Match found on Semantic Scholar
+  ✓ Match found on Crossref
   ✓ Valid DOI: 10.1002/andp.19053221004
 
 [2/15] Checking: smith2023ai
@@ -247,7 +249,7 @@ Found 2 issues:
   ⚠ Entry smith2023ai, field 'title': Contains em-dash ('—')
 
 Found 1 potential corrections:
-  ℹ einstein1905: Found matching entry on Semantic Scholar
+  ℹ einstein1905: Found matching entry on Crossref
 
 ============================================================
 ```
@@ -255,25 +257,27 @@ Found 1 potential corrections:
 ## How It Works
 
 1. **BibTeX Parsing**: Uses `pybtex` to load and parse your bibliography
-2. **Semantic Scholar Integration**: Uses the Semantic Scholar API to query papers by title
-3. **Title Matching**: Implements fuzzy matching (Jaccard similarity) to handle title variations
-4. **Data Validation**: Checks DOIs via HTTP requests, detects unicode patterns, validates LaTeX escaping
-5. **Ground Truth Replacement**: When matches are found, replaces entire entries with Semantic Scholar data
-6. **Rate Limiting**: Automatically handles API rate limits (429 errors) with exponential backoff
+2. **Crossref Integration (Primary)**: Uses the Crossref API to query bibliographic data by title (20 req/sec)
+3. **Semantic Scholar Integration (Fallback)**: Falls back to Semantic Scholar API when Crossref doesn't find a match
+4. **Title Matching**: Implements fuzzy matching (Jaccard similarity) to handle title variations
+5. **Data Validation**: Checks DOIs via HTTP requests, detects unicode patterns, validates LaTeX escaping
+6. **Ground Truth Replacement**: When matches are found, replaces entire entries with API data
+7. **Rate Limiting**: Automatically handles API rate limits (429 errors) with exponential backoff
 
 ## Tips for Best Results
 
-- **Rate Limiting**: Semantic Scholar has API rate limits. The tool automatically handles 429 errors with exponential backoff
-- **Network Issues**: The tool requires internet access for Semantic Scholar API and DOI validation
-- **Large Files**: For 700+ entries, expect the full run to take significant time due to rate limiting
+- **Crossref Polite Pool**: Set `CROSSREF_MAILTO` environment variable with your email for better service
+- **Fast Processing**: Crossref allows 20 requests/sec, so large files process quickly (default 0.05s delay)
+- **Network Issues**: The tool requires internet access for API calls and DOI validation
+- **Large Files**: With Crossref, 700+ entries can be processed in ~35 seconds (vs minutes with other APIs)
 - **Backup First**: Always keep a backup of your original .bib file before using `--update-scholar`
 
 ## Troubleshooting
 
-**Semantic Scholar rate limiting issues?**
-- The tool automatically retries with exponential backoff (2s, 4s, 8s)
-- Increase the delay between requests: `--delay 3.0` or higher
-- Run diagnostics in smaller batches if needed
+**API rate limiting issues?**
+- Crossref: The tool uses 0.05s delay (20 req/sec) by default, which is within limits
+- Semantic Scholar (fallback): Automatically retries with exponential backoff (2s, 4s, 8s)
+- Adjust delay if needed: `--delay 0.1` for slower Crossref queries
 
 **"Title mismatch" warnings?**
 - The tool uses fuzzy matching, but may still miss some matches
