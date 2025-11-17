@@ -139,7 +139,7 @@ python biblatex_diagnostics.py --help
 python biblatex_diagnostics.py my_references.bib -v
 ```
 
-This will check all ~700 entries for:
+This will check all entries for:
 - **Core validation**: Entry types, required fields, date/year validity, ISBN/ISSN/arXiv formats
 - **Completeness**: Missing recommended fields, suspiciously bare entries
 - **Consistency**: Field naming (journal vs journaltitle), crossref validity
