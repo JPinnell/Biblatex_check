@@ -14,45 +14,94 @@ from pybtex.database import parse_file, BibliographyData, Entry
 from pybtex.database.output.bibtex import Writer
 
 
-# Biblatex entry type specifications
-BIBLATEX_ENTRY_TYPES = {
+# Entry type specifications (accepts both BibTeX and BibLaTeX field names)
+# Format: 'field_name' or ['field1', 'field2'] for alternatives (either is acceptable)
+ENTRY_TYPES = {
     'article': {
-        'required': ['author', 'title', 'journaltitle', 'year'],
+        'required': [
+            'author',
+            'title',
+            ['journal', 'journaltitle'],  # BibTeX uses 'journal', BibLaTeX uses 'journaltitle'
+            ['year', 'date']              # BibTeX uses 'year', BibLaTeX uses 'date'
+        ],
         'optional': ['volume', 'number', 'pages', 'doi', 'issn', 'url']
     },
     'book': {
-        'required': ['author', 'title', 'year'],
+        'required': [
+            'author',
+            'title',
+            ['year', 'date']
+        ],
         'optional': ['publisher', 'location', 'isbn', 'edition', 'pages']
     },
     'inproceedings': {
-        'required': ['author', 'title', 'booktitle', 'year'],
+        'required': [
+            'author',
+            'title',
+            'booktitle',
+            ['year', 'date']
+        ],
         'optional': ['editor', 'pages', 'publisher', 'location', 'doi']
     },
     'incollection': {
-        'required': ['author', 'title', 'booktitle', 'year'],
+        'required': [
+            'author',
+            'title',
+            'booktitle',
+            ['year', 'date']
+        ],
         'optional': ['editor', 'pages', 'publisher', 'chapter']
     },
     'phdthesis': {
-        'required': ['author', 'title', 'school', 'year'],
+        'required': [
+            'author',
+            'title',
+            'school',
+            ['year', 'date']
+        ],
         'optional': ['address', 'month', 'url']
     },
     'mastersthesis': {
-        'required': ['author', 'title', 'school', 'year'],
+        'required': [
+            'author',
+            'title',
+            'school',
+            ['year', 'date']
+        ],
         'optional': ['address', 'month', 'url']
     },
     'techreport': {
-        'required': ['author', 'title', 'institution', 'year'],
+        'required': [
+            'author',
+            'title',
+            'institution',
+            ['year', 'date']
+        ],
         'optional': ['number', 'address', 'month']
     },
     'misc': {
         'required': [],
-        'optional': ['author', 'title', 'year', 'howpublished', 'note']
+        'optional': ['author', 'title', ['year', 'date'], 'howpublished', 'note']
     },
     'online': {
-        'required': ['title', 'url', 'year'],
+        'required': [
+            'title',
+            'url',
+            ['year', 'date']
+        ],
         'optional': ['author', 'urldate', 'organization']
     },
 }
+
+# Field name mappings: BibTeX -> BibLaTeX
+BIBTEX_TO_BIBLATEX = {
+    'journal': 'journaltitle',
+    'year': 'date',
+    'address': 'location',
+}
+
+# Field name mappings: BibLaTeX -> BibTeX
+BIBLATEX_TO_BIBTEX = {v: k for k, v in BIBTEX_TO_BIBLATEX.items()}
 
 # Recommended fields for completeness
 RECOMMENDED_FIELDS = {
@@ -225,23 +274,31 @@ class BibTeXCleaner:
     # ===== Entry Type and Field Validation =====
 
     def check_entry_type_fields(self, key: str, entry: Entry):
-        """Check required fields for entry type."""
+        """Check required fields for entry type (accepts both BibTeX and BibLaTeX field names)."""
         entry_type = entry.type.lower()
 
-        if entry_type not in BIBLATEX_ENTRY_TYPES:
+        if entry_type not in ENTRY_TYPES:
             self.warnings.append(
                 f"Entry {key}: Unknown entry type '@{entry_type}'"
             )
             return
 
-        spec = BIBLATEX_ENTRY_TYPES[entry_type]
+        spec = ENTRY_TYPES[entry_type]
         required = spec.get('required', [])
 
         # Check for missing required fields
+        # Fields can be strings (exact match) or lists (any alternative is acceptable)
         missing = []
-        for field in required:
-            if field not in entry.fields and field not in entry.persons:
-                missing.append(field)
+        for field_spec in required:
+            if isinstance(field_spec, list):
+                # Alternative fields - at least one must be present
+                alternatives = field_spec
+                if not any(alt in entry.fields or alt in entry.persons for alt in alternatives):
+                    missing.append(' OR '.join(alternatives))
+            else:
+                # Single required field
+                if field_spec not in entry.fields and field_spec not in entry.persons:
+                    missing.append(field_spec)
 
         if missing:
             self.issues.append(
@@ -327,11 +384,42 @@ class BibTeXCleaner:
                 self.issues.append(f"Entry {key}: Placeholder value in url: '{url}'")
 
     def check_field_consistency(self, key: str, entry: Entry):
-        """Check field naming consistency."""
-        # BibLaTeX uses 'journaltitle', not 'journal'
+        """Check field naming consistency (BibTeX vs BibLaTeX)."""
+        # Check if entry mixes BibTeX and BibLaTeX field names
+        has_bibtex_fields = False
+        has_biblatex_fields = False
+        mixed_fields = []
+
+        # Check for BibTeX-style fields
         if 'journal' in entry.fields:
+            has_bibtex_fields = True
+        if 'year' in entry.fields and 'date' not in entry.fields:
+            has_bibtex_fields = True
+        if 'address' in entry.fields:
+            has_bibtex_fields = True
+
+        # Check for BibLaTeX-style fields
+        if 'journaltitle' in entry.fields:
+            has_biblatex_fields = True
+        if 'date' in entry.fields:
+            has_biblatex_fields = True
+        if 'location' in entry.fields:
+            has_biblatex_fields = True
+
+        # Warn if both present (especially problematic pairs)
+        if 'journal' in entry.fields and 'journaltitle' in entry.fields:
             self.warnings.append(
-                f"Entry {key}: Use 'journaltitle' instead of 'journal' in biblatex"
+                f"Entry {key}: Has both 'journal' (BibTeX) and 'journaltitle' (BibLaTeX) - use only one"
+            )
+
+        if 'year' in entry.fields and 'date' in entry.fields:
+            self.warnings.append(
+                f"Entry {key}: Has both 'year' (BibTeX) and 'date' (BibLaTeX) - use only one"
+            )
+
+        if 'address' in entry.fields and 'location' in entry.fields:
+            self.warnings.append(
+                f"Entry {key}: Has both 'address' (BibTeX) and 'location' (BibLaTeX) - use only one"
             )
 
     def check_completeness(self, key: str, entry: Entry):
