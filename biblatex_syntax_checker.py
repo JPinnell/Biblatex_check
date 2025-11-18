@@ -148,6 +148,8 @@ class BibTeXSyntaxChecker:
         inside_entry = False
         entry_key = ""
         entry_start = 0
+        in_multiline_field = False
+        multiline_brace_count = 0
 
         entry_pattern = re.compile(r'^\s*@(\w+)\s*\{\s*([^,\s]+)', re.IGNORECASE)
         field_pattern = re.compile(r'^\s*(\w+)\s*=', re.IGNORECASE)
@@ -164,6 +166,8 @@ class BibTeXSyntaxChecker:
                 inside_entry = True
                 entry_key = match.group(2)
                 entry_start = line_num
+                in_multiline_field = False
+                multiline_brace_count = 0
                 # Check if entry starts without a comma after key
                 if not re.search(r',\s*$', line):
                     # Could be on the same line or next line - check next line
@@ -182,20 +186,32 @@ class BibTeXSyntaxChecker:
                 # Check if this is a closing brace
                 if closing_pattern.match(line):
                     inside_entry = False
+                    in_multiline_field = False
                     continue
 
-                # Check if this is a field
+                # Check if this is a field declaration
                 field_match = field_pattern.match(line)
                 if field_match:
                     field_name = field_match.group(1)
 
-                    # Check for missing comma at end of field (look for next line)
+                    # Count braces to detect multi-line field values
+                    # After the '=' sign, count braces
+                    after_equals = line.split('=', 1)[1] if '=' in line else ""
+                    open_braces = after_equals.count('{')
+                    close_braces = after_equals.count('}')
+                    multiline_brace_count = open_braces - close_braces
+
+                    if multiline_brace_count > 0:
+                        # This field value continues on next line(s)
+                        in_multiline_field = True
+                        continue
+
+                    # Single-line field - check if it needs a comma
                     if line_num < len(self.lines):
                         next_line = self.lines[line_num].strip()
                         if next_line and not next_line.startswith('%'):
-                            # Next line should be another field, closing brace, or empty
-                            if not field_pattern.match(next_line) and not closing_pattern.match(next_line) and next_line:
-                                # Current line should end with comma
+                            # If next line is a field or closing brace, current line needs comma
+                            if field_pattern.match(next_line) or closing_pattern.match(next_line):
                                 if not re.search(r',\s*$', line):
                                     self.issues.append(SyntaxIssue(
                                         line_num,
@@ -203,6 +219,23 @@ class BibTeXSyntaxChecker:
                                         f"Field '{field_name}' in entry '{entry_key}' missing comma at end",
                                         line.strip()[:80]
                                     ))
+                elif in_multiline_field:
+                    # Continue counting braces for multi-line field
+                    multiline_brace_count += line.count('{') - line.count('}')
+                    if multiline_brace_count <= 0:
+                        # Multi-line field ended, check for comma
+                        in_multiline_field = False
+                        if line_num < len(self.lines):
+                            next_line = self.lines[line_num].strip()
+                            if next_line and not next_line.startswith('%'):
+                                if field_pattern.match(next_line) or closing_pattern.match(next_line):
+                                    if not re.search(r',\s*$', line):
+                                        self.issues.append(SyntaxIssue(
+                                            line_num,
+                                            "ERROR",
+                                            f"Multi-line field in entry '{entry_key}' missing comma at end",
+                                            line.strip()[:80]
+                                        ))
 
     def check_string_delimiters(self):
         """Check for proper string delimiters in field values."""
