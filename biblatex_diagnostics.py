@@ -10,7 +10,8 @@ import os
 import time
 import argparse
 import requests
-from typing import Dict, List, Optional
+import unicodedata
+from typing import Dict, List, Optional, Tuple
 from pybtex.database import parse_file, BibliographyData, Entry, Person
 from pybtex.database.output.bibtex import Writer
 
@@ -21,6 +22,166 @@ MAILTO_EMAIL = os.environ.get('CROSSREF_MAILTO', 'research@example.com')
 # Semantic Scholar API endpoint (fallback)
 SEMANTIC_SCHOLAR_API_BASE = "https://api.semanticscholar.org/graph/v1"
 SEMANTIC_SCHOLAR_API_KEY = os.environ.get('SEMANTIC_SCHOLAR_API_KEY', None)
+
+# Name particles that should be ignored when comparing/sorting author names
+NAME_PARTICLES = {'von', 'van', 'de', 'del', 'della', 'di', 'du', 'le', 'la', 'da', 'dos', 'das', 'ten', 'ter', 'den', 'der'}
+NAME_SUFFIXES = {'jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'v'}
+
+
+def remove_accents(text: str) -> str:
+    """Remove accents from Unicode string."""
+    # Normalize to NFD (decomposed form)
+    nfd = unicodedata.normalize('NFD', text)
+    # Filter out combining characters (accents)
+    return ''.join(char for char in nfd if unicodedata.category(char) != 'Mn')
+
+
+def normalize_latex_text(text: str) -> str:
+    """
+    Normalize LaTeX text by converting LaTeX accents to their Unicode equivalents,
+    then removing accents for comparison.
+
+    Examples:
+        g{\\'e}r{\\^o}me -> gérôme -> gerome
+        \\"{o} -> ö -> o
+    """
+    # Common LaTeX accent commands
+    latex_accents = {
+        r"\'": '',  # acute
+        r'\`': '',  # grave
+        r'\^': '',  # circumflex
+        r'\"': '',  # umlaut
+        r'\~': '',  # tilde
+        r'\=': '',  # macron
+        r'\.': '',  # dot above
+        r'\u': '',  # breve
+        r'\v': '',  # caron
+        r'\H': '',  # double acute
+        r'\c': '',  # cedilla
+        r'\k': '',  # ogonek
+        r'\r': '',  # ring above
+    }
+
+    # First, handle braced accent commands like {\'e}
+    for cmd in latex_accents.keys():
+        # Match patterns like {\cmd{letter}} or {\\cmd letter}
+        text = re.sub(r'\{' + re.escape(cmd) + r'\{([a-zA-Z])\}\}', r'\1', text)
+        text = re.sub(r'\{' + re.escape(cmd) + r'([a-zA-Z])\}', r'\1', text)
+        text = re.sub(re.escape(cmd) + r'\{([a-zA-Z])\}', r'\1', text)
+        text = re.sub(re.escape(cmd) + r'([a-zA-Z])', r'\1', text)
+
+    # Remove any remaining braces
+    text = text.replace('{', '').replace('}', '')
+
+    # Remove accents from any Unicode characters
+    text = remove_accents(text)
+
+    return text
+
+
+def normalize_ampersand(text: str) -> str:
+    """Normalize ampersands for comparison: &amp; -> & and \\& -> &"""
+    text = text.replace('&amp;', '&')
+    text = text.replace('\\&', '&')
+    return text
+
+
+def extract_author_components(person_str: str) -> Tuple[str, str, List[str]]:
+    """
+    Extract last name, initials, and particles from author name.
+
+    Returns:
+        (lastname, initials, particles) tuple
+
+    Examples:
+        "John von Neumann" -> ("neumann", "J", ["von"])
+        "De Gennes, Pierre-Gilles" -> ("gennes", "PG", ["de"])
+        "Smith Jr., John" -> ("smith", "J", ["jr"])
+    """
+    person_str = person_str.strip()
+    particles = []
+
+    # Check for comma-separated format (Last, First)
+    if ',' in person_str:
+        parts = person_str.split(',')
+        last_part = parts[0].strip()
+        first_part = parts[1].strip() if len(parts) > 1 else ''
+    else:
+        # Space-separated format
+        parts = person_str.split()
+        if len(parts) == 0:
+            return ('', '', [])
+        elif len(parts) == 1:
+            return (normalize_latex_text(parts[0]).lower(), '', [])
+
+        # Find the last name (rightmost non-particle, non-suffix word)
+        last_idx = len(parts) - 1
+
+        # Check if last word is a suffix
+        if parts[last_idx].lower().rstrip('.') in NAME_SUFFIXES:
+            particles.append(parts[last_idx].lower().rstrip('.'))
+            last_idx -= 1
+
+        if last_idx < 0:
+            return ('', '', particles)
+
+        last_part = parts[last_idx]
+        first_part = ' '.join(parts[:last_idx])
+
+        # Check for particles before last name
+        while last_idx > 0 and parts[last_idx - 1].lower() in NAME_PARTICLES:
+            last_idx -= 1
+            particles.insert(0, parts[last_idx].lower())
+            last_part = parts[-1]
+            first_part = ' '.join(parts[:last_idx])
+
+    # Normalize last name
+    lastname = normalize_latex_text(last_part).lower().strip()
+
+    # Extract initials from first name
+    initials = ''
+    if first_part:
+        # Remove LaTeX formatting and get first letters
+        first_normalized = normalize_latex_text(first_part)
+        # Split by spaces and hyphens
+        name_parts = re.split(r'[\s\-]+', first_normalized)
+        for part in name_parts:
+            part = part.strip()
+            if part and part.lower() not in NAME_PARTICLES and part.lower().rstrip('.') not in NAME_SUFFIXES:
+                initials += part[0].upper()
+
+    return (lastname, initials, particles)
+
+
+def check_unclosed_math_mode(text: str) -> bool:
+    """Check if there are unclosed $ symbols in LaTeX text."""
+    # Count $ symbols that aren't escaped
+    dollar_count = 0
+    i = 0
+    while i < len(text):
+        if text[i] == '$':
+            # Check if it's escaped
+            if i == 0 or text[i-1] != '\\':
+                dollar_count += 1
+        i += 1
+
+    # Should be even (each opening $ has a closing $)
+    return dollar_count % 2 != 0
+
+
+def check_page_range_format(pages: str) -> Optional[str]:
+    """
+    Check if page range uses double hyphen (--).
+    Returns error message if format is wrong, None if correct.
+    """
+    if not pages or '--' in pages:
+        return None  # Already correct or no pages
+
+    # Check for single dash or other dash characters
+    if '-' in pages or '–' in pages or '—' in pages:
+        return f"Page range should use double hyphen '--' not single dash: '{pages}'"
+
+    return None
 
 
 class BibTeXAPIChecker:
@@ -143,6 +304,12 @@ class BibTeXAPIChecker:
         """Compare fields between local entry and API result (BibTeX/BibLaTeX agnostic)."""
         issues = []
 
+        # Check for unclosed LaTeX math mode in title
+        if 'title' in entry.fields:
+            title = entry.fields['title']
+            if check_unclosed_math_mode(title):
+                issues.append(f"Unclosed LaTeX math mode ($) in title")
+
         # Compare DOI
         if 'doi' in entry.fields:
             entry_doi = entry.fields['doi'].lower()
@@ -176,57 +343,132 @@ class BibTeXAPIChecker:
             api_journal_list = api_result.get('container-title', [])
             if api_journal_list:
                 api_journal = api_journal_list[0] if isinstance(api_journal_list, list) else api_journal_list
-                # Normalize for comparison
-                entry_journal_clean = entry_journal.lower().strip()
-                api_journal_clean = api_journal.lower().strip()
+                # Normalize ampersands for comparison (API returns &amp;, BibTeX uses \&)
+                entry_journal_clean = normalize_ampersand(entry_journal.lower().strip())
+                api_journal_clean = normalize_ampersand(api_journal.lower().strip())
                 if entry_journal_clean != api_journal_clean:
                     issues.append(f"Journal mismatch: '{entry_journal}' vs '{api_journal}'")
 
-        # Compare authors (check both count and names)
+        # Check page range format
+        if 'pages' in entry.fields:
+            page_error = check_page_range_format(entry.fields['pages'])
+            if page_error:
+                issues.append(page_error)
+
+        # Compare authors (improved with accent handling, particles, and order checking)
         if 'author' in entry.persons:
             entry_authors = entry.persons['author']
             entry_author_count = len(entry_authors)
-            # Extract entry author last names
-            entry_lastnames = []
+
+            # Check for "et al." in author list
+            entry_author_str = ' and '.join([str(p) for p in entry_authors])
+            if 'et al.' in entry_author_str.lower():
+                issues.append("Found 'et al.' in author list - recommend changing to 'and others'")
+
+            # Check for "and others" with too few authors (likely hallucination)
+            if 'and others' in entry_author_str.lower() and entry_author_count < 5:
+                issues.append(f"Found 'and others' with only {entry_author_count} authors - possible hallucination")
+
+            # Extract entry author components (last name, initials, particles)
+            entry_author_info = []
             for person in entry_authors:
                 person_str = str(person)
-                parts = person_str.split()
-                if parts:
-                    if ',' in person_str:
-                        entry_lastnames.append(parts[0].rstrip(',').lower())
-                    else:
-                        entry_lastnames.append(parts[-1].lower())
-            # Extract API author last names
-            api_lastnames = []
+                lastname, initials, particles = extract_author_components(person_str)
+                entry_author_info.append({
+                    'original': person_str,
+                    'lastname': lastname,
+                    'initials': initials,
+                    'particles': particles
+                })
+
+            # Extract API author information
+            api_author_info = []
             api_author_count = 0
             if source == 'crossref':
                 api_authors = api_result.get('author', [])
                 api_author_count = len(api_authors)
                 for author in api_authors:
-                    family = author.get('family', '').lower()
-                    if family:
-                        api_lastnames.append(family)
+                    given = author.get('given', '')
+                    family = author.get('family', '')
+                    full_name = f"{given} {family}".strip() if given else family
+                    lastname, initials, particles = extract_author_components(full_name)
+                    api_author_info.append({
+                        'original': full_name,
+                        'lastname': lastname,
+                        'initials': initials,
+                        'particles': particles
+                    })
             else:  # semantic scholar
                 api_authors = api_result.get('authors', [])
                 api_author_count = len(api_authors)
                 for author in api_authors:
                     name = author.get('name', '')
-                    parts = name.split()
-                    if parts:
-                        api_lastnames.append(parts[-1].lower())
-            # Compare author count
+                    lastname, initials, particles = extract_author_components(name)
+                    api_author_info.append({
+                        'original': name,
+                        'lastname': lastname,
+                        'initials': initials,
+                        'particles': particles
+                    })
+
+            # Compare author count (show actual author lists)
             if api_author_count and entry_author_count != api_author_count:
-                issues.append(f"Author count mismatch: {entry_author_count} vs {api_author_count}")
-            # Compare author names (check for mismatches in last names)
-            if api_lastnames and entry_lastnames:
-                entry_set = set(entry_lastnames)
-                api_set = set(api_lastnames)
-                extra_in_entry = entry_set - api_set
-                if extra_in_entry:
-                    issues.append(f"Author(s) in entry but not in API: {', '.join(sorted(extra_in_entry))}")
-                missing_from_entry = api_set - entry_set
-                if missing_from_entry:
-                    issues.append(f"Author(s) in API but not in entry: {', '.join(sorted(missing_from_entry))}")
+                entry_names = ' and '.join([a['original'] for a in entry_author_info])
+                api_names = ' and '.join([a['original'] for a in api_author_info])
+                issues.append(f"Author count mismatch: '{entry_names}' vs '{api_names}'")
+
+            # Compare author order and details
+            if api_author_info and entry_author_info:
+                # Check first author match (critical for citation key)
+                if len(entry_author_info) > 0 and len(api_author_info) > 0:
+                    entry_first = entry_author_info[0]
+                    api_first = api_author_info[0]
+
+                    first_author_mismatch = False
+                    if entry_first['lastname'] != api_first['lastname']:
+                        first_author_mismatch = True
+                        issues.append(
+                            f"First author mismatch: '{entry_first['original']}' vs '{api_first['original']}' - "
+                            f"KEY MAY NEED TO CHANGE"
+                        )
+                    elif entry_first['initials'] and api_first['initials'] and entry_first['initials'] != api_first['initials']:
+                        issues.append(
+                            f"First author initials mismatch: '{entry_first['original']}' vs '{api_first['original']}'"
+                        )
+
+                # Check for author order issues (compare all authors in sequence)
+                max_check = min(len(entry_author_info), len(api_author_info))
+                for i in range(max_check):
+                    entry_auth = entry_author_info[i]
+                    api_auth = api_author_info[i]
+
+                    # Skip if we already reported first author mismatch
+                    if i == 0 and first_author_mismatch:
+                        continue
+
+                    # Check last name and initials
+                    if entry_auth['lastname'] != api_auth['lastname']:
+                        # Check if this author appears elsewhere in the list (wrong order)
+                        found_elsewhere = False
+                        for j, other_api in enumerate(api_author_info):
+                            if j != i and entry_auth['lastname'] == other_api['lastname']:
+                                issues.append(
+                                    f"Author order mismatch at position {i+1}: "
+                                    f"'{entry_auth['original']}' should be at position {j+1}"
+                                )
+                                found_elsewhere = True
+                                break
+
+                        if not found_elsewhere:
+                            # Author in entry but not in API at any position
+                            issues.append(
+                                f"Author at position {i+1} not in API: '{entry_auth['original']}' vs '{api_auth['original']}'"
+                            )
+                    elif entry_auth['initials'] and api_auth['initials'] and entry_auth['initials'] != api_auth['initials']:
+                        issues.append(
+                            f"Author initials mismatch at position {i+1}: "
+                            f"'{entry_auth['original']}' vs '{api_auth['original']}'"
+                        )
 
         if issues:
             self.field_mismatches.append({
@@ -725,7 +967,88 @@ class BibTeXAPIChecker:
 
         return bib_data
 
-    def generate_report(self) -> str:
+    def _rank_suggestions(self, entry_id: str, entry_suggestions: List[Dict], bib_data: BibliographyData) -> List[Dict]:
+        """
+        Rank suggestions by relevance (first author match, title similarity, year).
+
+        Args:
+            entry_id: The BibTeX entry ID
+            entry_suggestions: List of suggestion dictionaries
+            bib_data: The BibTeX database to get entry details
+
+        Returns:
+            Sorted list of suggestions (most relevant first)
+        """
+        if entry_id not in bib_data.entries:
+            return entry_suggestions
+
+        entry = bib_data.entries[entry_id]
+
+        # Get entry's first author last name
+        entry_first_author_lastname = None
+        if 'author' in entry.persons and len(entry.persons['author']) > 0:
+            first_author_str = str(entry.persons['author'][0])
+            entry_first_author_lastname, _, _ = extract_author_components(first_author_str)
+
+        # Get entry's year
+        entry_year = None
+        if 'year' in entry.fields:
+            entry_year = entry.fields['year'][:4]
+        elif 'date' in entry.fields:
+            entry_year = entry.fields['date'][:4]
+
+        # Get entry's title
+        entry_title = entry.fields.get('title', '').strip('{}').strip().lower()
+
+        # Calculate score for each suggestion
+        scored_suggestions = []
+        for sug in entry_suggestions:
+            score = 0
+
+            # Check first author match (highest priority: +100 points)
+            sug_authors_str = sug.get('authors', '')
+            if sug_authors_str and sug_authors_str != 'N/A':
+                # Get first author from suggestion
+                first_sug_author = sug_authors_str.split(',')[0].strip()
+                sug_first_lastname, _, _ = extract_author_components(first_sug_author)
+
+                if entry_first_author_lastname and sug_first_lastname:
+                    if entry_first_author_lastname == sug_first_lastname:
+                        score += 100  # Same first author
+                    elif entry_first_author_lastname in sug_first_lastname or sug_first_lastname in entry_first_author_lastname:
+                        score += 50  # Partial match
+
+            # Check title similarity (+50 points for good match)
+            sug_title = sug.get('suggestion', '').lower()
+            if entry_title and sug_title:
+                # Calculate word overlap
+                entry_words = set(re.sub(r'[^\w\s]', '', entry_title).split())
+                sug_words = set(re.sub(r'[^\w\s]', '', sug_title).split())
+                if entry_words and sug_words:
+                    overlap = len(entry_words & sug_words) / len(entry_words | sug_words)
+                    score += int(overlap * 50)
+
+            # Check year match (+30 points)
+            sug_year = sug.get('year', 'N/A')
+            if entry_year and sug_year != 'N/A' and str(entry_year) == str(sug_year):
+                score += 30
+
+            # Bonus points for certain search strategies
+            strategy = sug.get('strategy', '')
+            if strategy == 'author_year':
+                score += 10
+            elif strategy == 'author_keywords':
+                score += 5
+
+            scored_suggestions.append((score, sug))
+
+        # Sort by score (highest first)
+        scored_suggestions.sort(key=lambda x: x[0], reverse=True)
+
+        # Return just the suggestions (without scores)
+        return [sug for score, sug in scored_suggestions]
+
+    def generate_report(self, bib_data: Optional[BibliographyData] = None) -> str:
         """Generate validation report."""
         report = []
         report.append("\n" + "=" * 60)
@@ -764,6 +1087,10 @@ class BibTeXAPIChecker:
                 by_entry[entry_id].append(sug)
 
             for entry_id, entry_suggestions in by_entry.items():
+                # Rank suggestions if we have bib_data
+                if bib_data:
+                    entry_suggestions = self._rank_suggestions(entry_id, entry_suggestions, bib_data)
+
                 report.append(f"\n  💡 {entry_id} - Did you mean one of these?")
                 for idx, sug in enumerate(entry_suggestions[:5], 1):  # Show up to 5 suggestions
                     report.append(f"      [{idx}] {sug['suggestion']}")
@@ -826,7 +1153,7 @@ Examples:
             checker.validate_all_entries(bib_data)
 
         # Generate report
-        report = checker.generate_report()
+        report = checker.generate_report(bib_data)
         if args.report_file:
             with open(args.report_file, 'w', encoding='utf-8') as f:
                 f.write(report)
