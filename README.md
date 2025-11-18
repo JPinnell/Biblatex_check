@@ -1,11 +1,106 @@
 # BibTeX Diagnostic and Cleaning Tools
 
-Two focused Python tools for working with BibTeX/BibLaTeX files:
+Three focused Python tools for working with BibTeX/BibLaTeX files:
 
-1. **biblatex_diagnostics.py** - Validates entries against online APIs (Crossref + Semantic Scholar)
+1. **biblatex_syntax_checker.py** - Pre-validation for syntax errors (use FIRST)
 2. **biblatex_cleaner.py** - Local formatting validator (no API calls, works offline)
+3. **biblatex_diagnostics.py** - Validates entries against online APIs (Crossref + Semantic Scholar)
 
 Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
+
+## ⚠️ IMPORTANT: Tool Order Matters
+
+**Always use the tools in this order:**
+
+```bash
+# Step 1: Check syntax (finds parse-blocking errors)
+python3 biblatex_syntax_checker.py mybib.bib
+
+# Step 2: Check formatting (finds semantic issues)
+python3 biblatex_cleaner.py mybib.bib
+
+# Step 3: Validate against APIs (checks against online databases)
+python3 biblatex_diagnostics.py mybib.bib
+```
+
+If you skip Step 1, the other tools will crash on syntax errors with minimal information.
+
+## biblatex_syntax_checker.py - Syntax Pre-Validation
+
+**Use this tool FIRST** to find syntax errors that prevent parsing.
+
+### Why This Tool Exists
+
+The other tools use pybtex to parse BibTeX files, which crashes immediately on the first syntax error. This pre-validator uses text-based analysis to find ALL syntax errors at once, saving you time.
+
+### Features
+
+- **Duplicate key detection**: Finds all duplicate citation keys
+- **Invalid entry types**: Catches typos like `@Artcle` instead of `@Article`
+- **Brace balance checking**: Finds unclosed or extra braces
+- **Missing commas**: Detects missing commas in field declarations
+- **Field formatting**: Checks for malformed field declarations
+- **Fast and reliable**: Text-based analysis, doesn't require parsing
+
+### Usage
+
+Check syntax:
+
+```bash
+python3 biblatex_syntax_checker.py references.bib
+```
+
+Save report to file:
+
+```bash
+python3 biblatex_syntax_checker.py references.bib -r syntax_report.txt
+```
+
+### Example Output
+
+```
+Checking syntax of: references.bib
+============================================================
+
+============================================================
+BIBTEX SYNTAX CHECK REPORT
+============================================================
+
+ERRORS FOUND: 3
+------------------------------------------------------------
+✗ Line 99: Duplicate citation key 'Pinnell2020' (also appears on lines: 99, 129)
+✗ Line 168: Unmatched braces in entry 'Toyoda2012' (started at line 168)
+✗ Line 179: Invalid entry type '@Artcle' (valid types: article, book, inproceedings, etc.)
+    Context: @Artcle{Sherson2010,
+
+WARNINGS: 2
+------------------------------------------------------------
+⚠ Line 110: Field 'month' in entry 'Pinnell2020' has unusual value delimiter
+    Context: month = sep,
+⚠ Line 132: Entry 'Pinnell2020' may contain unescaped ampersand (use \&)
+    Context: journaltitle = {Laser & Photonics Reviews},
+
+============================================================
+
+NEXT STEPS:
+1. Fix the ERROR items above (these prevent parsing)
+2. Review and fix WARNING items (recommended)
+3. Run biblatex_cleaner.py for detailed formatting checks
+4. Run biblatex_diagnostics.py to validate against APIs
+============================================================
+```
+
+### Command-Line Options
+
+```
+usage: biblatex_syntax_checker.py [-h] [-r REPORT_FILE] input_file
+
+Arguments:
+  input_file           Input BibTeX file
+
+Options:
+  -r, --report-file    Save report to file
+```
 
 ## biblatex_diagnostics.py - API Validation
 

@@ -79,9 +79,34 @@ class BibTeXCleaner:
     def load_bibtex(self, filepath: str) -> BibliographyData:
         """Load a BibTeX file."""
         self.log(f"Loading BibTeX file: {filepath}")
-        bib_data = parse_file(filepath)
-        self.log(f"Loaded {len(bib_data.entries)} entries")
-        return bib_data
+
+        try:
+            bib_data = parse_file(filepath)
+            self.log(f"Loaded {len(bib_data.entries)} entries")
+            return bib_data
+        except Exception as e:
+            error_msg = str(e)
+            print(f"\n{'='*60}")
+            print("ERROR: Failed to parse BibTeX file")
+            print(f"{'='*60}")
+            print(f"\n{error_msg}\n")
+
+            # Check for common issues
+            if "repeated bibliography entry" in error_msg.lower():
+                print("This means you have duplicate citation keys in your .bib file.")
+                print("Each entry must have a unique key.\n")
+            elif "expected ," in error_msg.lower() or "unexpected" in error_msg.lower():
+                print("This indicates a syntax error in your .bib file.")
+                print("Common issues: missing commas, missing braces, or invalid characters.\n")
+
+            print("SUGGESTION: Fix syntax errors FIRST using the syntax checker:")
+            print(f"  python3 biblatex_syntax_checker.py {filepath}\n")
+
+            print("The syntax checker will identify ALL syntax issues that prevent")
+            print("parsing. After fixing those, run this tool again for detailed")
+            print("formatting and semantic validation.\n")
+            print(f"{'='*60}")
+            raise
 
     def save_bibtex(self, bib_data: BibliographyData, filepath: str):
         """Save BibTeX database to file."""
