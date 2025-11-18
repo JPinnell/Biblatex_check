@@ -210,8 +210,9 @@ class BibTeXSyntaxChecker:
                     if line_num < len(self.lines):
                         next_line = self.lines[line_num].strip()
                         if next_line and not next_line.startswith('%'):
-                            # If next line is a field or closing brace, current line needs comma
-                            if field_pattern.match(next_line) or closing_pattern.match(next_line):
+                            # If next line is a field, current line needs comma
+                            # If next line is closing brace, comma is optional (last field)
+                            if field_pattern.match(next_line):
                                 if not re.search(r',\s*$', line):
                                     self.issues.append(SyntaxIssue(
                                         line_num,
@@ -228,7 +229,9 @@ class BibTeXSyntaxChecker:
                         if line_num < len(self.lines):
                             next_line = self.lines[line_num].strip()
                             if next_line and not next_line.startswith('%'):
-                                if field_pattern.match(next_line) or closing_pattern.match(next_line):
+                                # If next line is a field, current line needs comma
+                                # If next line is closing brace, comma is optional (last field)
+                                if field_pattern.match(next_line):
                                     if not re.search(r',\s*$', line):
                                         self.issues.append(SyntaxIssue(
                                             line_num,
