@@ -309,17 +309,48 @@ class BibTeXSyntaxChecker:
                 if line.strip() == '}':
                     inside_entry = False
 
+    def check_author_field_errors(self):
+        """Check for common errors in author fields."""
+        inside_entry = False
+        entry_key = ""
+        entry_pattern = re.compile(r'^\s*@(\w+)\s*\{\s*([^,\s]+)', re.IGNORECASE)
+        author_field_pattern = re.compile(r'^\s*author\s*=\s*(.+)', re.IGNORECASE)
+        for line_num, line in enumerate(self.lines, 1):
+            if line.strip().startswith('%'):
+                continue
+            match = entry_pattern.match(line)
+            if match:
+                inside_entry = True
+                entry_key = match.group(2)
+                continue
+            if inside_entry:
+                # Check for author field
+                author_match = author_field_pattern.match(line)
+                if author_match:
+                    author_value = author_match.group(1)
+                    # Check for double "and" (e.g., "and and")
+                    if re.search(r'\band\s+and\b', author_value, re.IGNORECASE):
+                        self.issues.append(SyntaxIssue(
+                            line_num,
+                            "ERROR",
+                            f"Entry '{entry_key}' has double 'and' in author field",
+                            line.strip()[:80]
+                        ))
+                if line.strip() == '}':
+                    inside_entry = False
+    
     def check_all(self):
         """Run all syntax checks."""
         print(f"\nChecking syntax of: {self.filepath}")
         print("=" * 60)
-
         self.check_duplicate_keys()
         self.check_entry_types()
         self.check_brace_balance()
         self.check_field_formatting()
         self.check_string_delimiters()
         self.check_special_characters()
+        self.check_author_field_errors()
+    
 
     def generate_report(self) -> str:
         """Generate a syntax report."""
