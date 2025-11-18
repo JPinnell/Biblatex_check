@@ -140,7 +140,7 @@ class BibTeXAPIChecker:
         return similarity > 0.7  # 70% similarity threshold
 
     def _compare_fields(self, key: str, entry: Entry, api_result: Dict, source: str):
-        """Compare fields between local entry and API result."""
+        """Compare fields between local entry and API result (BibTeX/BibLaTeX agnostic)."""
         issues = []
 
         # Compare DOI
@@ -150,9 +150,14 @@ class BibTeXAPIChecker:
             if api_doi and entry_doi != api_doi:
                 issues.append(f"DOI mismatch: '{entry_doi}' vs '{api_doi}'")
 
-        # Compare year
-        if 'year' in entry.fields or 'date' in entry.fields:
-            entry_year = entry.fields.get('year', entry.fields.get('date', ''))[:4]
+        # Compare year (check both 'year' and 'date' fields - BibTeX/BibLaTeX agnostic)
+        entry_year = None
+        if 'year' in entry.fields:
+            entry_year = entry.fields['year'][:4]
+        elif 'date' in entry.fields:
+            entry_year = entry.fields['date'][:4]
+
+        if entry_year:
             if source == 'crossref':
                 published = api_result.get('published', {}) or api_result.get('published-print', {})
                 if published and 'date-parts' in published and published['date-parts']:
@@ -162,8 +167,20 @@ class BibTeXAPIChecker:
             else:  # semantic scholar
                 api_year = str(api_result.get('year', '')) if api_result.get('year') else None
 
-            if api_year and entry_year and entry_year != api_year:
+            if api_year and entry_year != api_year:
                 issues.append(f"Year mismatch: '{entry_year}' vs '{api_year}'")
+
+        # Compare journal/journaltitle (check both - BibTeX/BibLaTeX agnostic)
+        entry_journal = entry.fields.get('journal') or entry.fields.get('journaltitle')
+        if entry_journal and source == 'crossref':
+            api_journal_list = api_result.get('container-title', [])
+            if api_journal_list:
+                api_journal = api_journal_list[0] if isinstance(api_journal_list, list) else api_journal_list
+                # Normalize for comparison
+                entry_journal_clean = entry_journal.lower().strip()
+                api_journal_clean = api_journal.lower().strip()
+                if entry_journal_clean != api_journal_clean:
+                    issues.append(f"Journal mismatch: '{entry_journal}' vs '{api_journal}'")
 
         # Compare authors (basic check - just count)
         if 'author' in entry.persons:
@@ -186,10 +203,7 @@ class BibTeXAPIChecker:
     def check_crossref(self, key: str, entry: Entry, update: bool = False) -> Optional[Entry]:
         """Check entry against Crossref API."""
         title = entry.fields.get('title', '').strip('{}').strip()
-        if not title:
-            return None
-
-        self.log(f"Searching Crossref for: {title}")
+        doi = entry.fields.get('doi', '').strip()
 
         # Get author names for additional search strategies
         author_names = []
@@ -208,21 +222,55 @@ class BibTeXAPIChecker:
             entry_year = entry.fields['date'][:4]
 
         try:
-            # Strategy 1: Search by title (get top 5 results)
             search_url = f"{CROSSREF_API_BASE}/works"
+            headers = {'User-Agent': f'biblatex-diagnostics/1.0 (mailto:{MAILTO_EMAIL})'}
+
+            # Track seen DOIs across all searches for this entry
+            seen_dois = set()
+
+            # STRATEGY 0: Search by DOI if available (most accurate)
+            if doi:
+                self.log(f"Searching Crossref by DOI: {doi}")
+                doi_url = f"{CROSSREF_API_BASE}/works/{doi}"
+
+                try:
+                    response = requests.get(doi_url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    if data.get('message'):
+                        result = data['message']
+                        self.log(f"✓ Found by DOI on Crossref")
+                        self.matches.append({
+                            'entry_id': key,
+                            'source': 'crossref',
+                            'title': title,
+                            'api_title': ''.join(result.get('title', ['']))
+                        })
+                        # Compare fields
+                        self._compare_fields(key, entry, result, 'crossref')
+                        if update:
+                            return self._crossref_to_entry(result, key, entry.type)
+                        return result
+                except Exception as e:
+                    self.log(f"DOI lookup failed: {str(e)}, falling back to title search")
+
+            # If no DOI or DOI search failed, fall back to title search
+            if not title:
+                return None
+
+            self.log(f"Searching Crossref for: {title}")
+
+            # Strategy 1: Search by title (get top 5 results)
             params = {
                 'query.title': title,
                 'rows': 5,  # Get multiple results for suggestions
                 'select': 'DOI,title,author,published,container-title,volume,issue,page,publisher,ISBN,ISSN,type'
             }
-            headers = {'User-Agent': f'biblatex-diagnostics/1.0 (mailto:{MAILTO_EMAIL})'}
 
             response = requests.get(search_url, params=params, headers=headers, timeout=10)
             response.raise_for_status()
             data = response.json()
-
-            # Track seen DOIs across all searches for this entry
-            seen_dois = set()
 
             if data.get('message') and data['message'].get('items') and len(data['message']['items']) > 0:
                 results = data['message']['items']
@@ -284,9 +332,60 @@ class BibTeXAPIChecker:
                                 'strategy': 'title_search'
                             })
 
-            # Strategy 2: If we have author names, try searching by author + title keywords
+            # Strategy 2: If we have author names and year, try author + year search
+            if author_names and entry_year and not self.matches:
+                self.log(f"Trying author+year search: {author_names[0]} {entry_year}")
+                query = f"{author_names[0]} {entry_year}"
+                params = {
+                    'query': query,
+                    'rows': 5,
+                    'select': 'DOI,title,author,published,container-title,volume,issue,page,publisher,ISBN,ISSN,type'
+                }
+
+                response = requests.get(search_url, params=params, headers=headers, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get('message') and data['message'].get('items'):
+                    for result in data['message']['items'][:5]:
+                        doi = result.get('DOI', '')
+                        if doi and doi not in seen_dois:
+                            seen_dois.add(doi)
+
+                            suggestion_title = ''.join(result.get('title', []))
+                            suggestion_authors = []
+                            for author in result.get('author', [])[:3]:
+                                given = author.get('given', '')
+                                family = author.get('family', '')
+                                if given and family:
+                                    suggestion_authors.append(f"{given} {family}")
+                                elif family:
+                                    suggestion_authors.append(family)
+
+                            published = result.get('published', {}) or result.get('published-print', {})
+                            suggestion_year = 'N/A'
+                            if published and 'date-parts' in published and published['date-parts']:
+                                date_parts = published['date-parts'][0]
+                                if date_parts and len(date_parts) > 0:
+                                    suggestion_year = str(date_parts[0])
+
+                            container_title = result.get('container-title', [])
+                            suggestion_journal = container_title[0] if container_title else 'N/A'
+
+                            self.suggestions.append({
+                                'entry_id': key,
+                                'source': 'crossref',
+                                'suggestion': suggestion_title,
+                                'authors': ', '.join(suggestion_authors) if suggestion_authors else 'N/A',
+                                'year': suggestion_year,
+                                'journal': suggestion_journal,
+                                'doi': result.get('DOI', 'N/A'),
+                                'strategy': 'author_year'
+                            })
+
+            # Strategy 3: If we have author names, try searching by author + title keywords
             if author_names and not self.matches:
-                self.log(f"Trying author-based search with {author_names[0]}")
+                self.log(f"Trying author+keywords search with {author_names[0]}")
                 # Take key words from title
                 title_words = title.lower().split()
                 # Remove common words
