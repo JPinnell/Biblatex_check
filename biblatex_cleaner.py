@@ -103,6 +103,49 @@ BIBTEX_TO_BIBLATEX = {
 # Field name mappings: BibLaTeX -> BibTeX
 BIBLATEX_TO_BIBTEX = {v: k for k, v in BIBTEX_TO_BIBLATEX.items()}
 
+# Known valid BibTeX/BibLaTeX field names (for detecting typos/forbidden fields)
+KNOWN_FIELDS = {
+    # Standard fields (both BibTeX and BibLaTeX)
+    'author', 'title', 'year', 'month', 'day',
+    'editor', 'publisher', 'organization', 'institution', 'school',
+    'volume', 'number', 'pages', 'chapter', 'edition',
+    'series', 'type', 'note', 'howpublished',
+    'booktitle', 'address', 'url', 'urldate',
+
+    # BibTeX-specific
+    'journal',
+
+    # BibLaTeX-specific
+    'journaltitle', 'date', 'location', 'maintitle', 'mainsubtitle',
+    'subtitle', 'titleaddon', 'language', 'origlanguage',
+    'eventtitle', 'eventdate', 'venue',
+
+    # Identifiers
+    'doi', 'eprint', 'eprinttype', 'eprintclass',
+    'isbn', 'issn', 'isrn', 'isan', 'ismn', 'isrc', 'iswc',
+
+    # Online/URLs
+    'eid', 'url', 'urldate',
+
+    # Cross-references
+    'crossref', 'xref', 'xdata', 'related', 'relatedtype', 'relatedstring',
+
+    # Pagination
+    'pagination', 'bookpagination',
+
+    # Misc
+    'abstract', 'annotation', 'keywords', 'file', 'library',
+    'addendum', 'pubstate', 'version',
+
+    # Special
+    'entryset', 'execute', 'gender', 'hyphenation', 'indextitle',
+    'indexsorttitle', 'label', 'nameaddon', 'options', 'presort',
+    'shortauthor', 'shorteditor', 'shorthand', 'shorthandintro',
+    'shortjournal', 'shortseries', 'shorttitle', 'sortkey', 'sortname',
+    'sortshorthand', 'sorttitle', 'sortyear', 'usera', 'userb', 'userc',
+    'userd', 'usere', 'userf', 'verba', 'verbb', 'verbc',
+}
+
 # Recommended fields for completeness
 RECOMMENDED_FIELDS = {
     'article': ['volume', 'number', 'pages', 'doi'],
@@ -265,8 +308,14 @@ class BibTeXCleaner:
                             f"Entry {key}, {role} #{idx} '{person_str}': Contains numbers"
                         )
 
-                    # Unusual characters
-                    if re.search(r'[^\w\s,.\-\'`]', person_str):
+                    # Unusual characters (but allow LaTeX commands)
+                    # Remove LaTeX commands first: {\' ...}, {\^ ...}, {\` ...}, etc.
+                    cleaned_name = re.sub(r'\{\\[`\'^"~=.]\{?[a-zA-Z]\}?\}', '', person_str)
+                    # Also remove other common LaTeX patterns
+                    cleaned_name = re.sub(r'\{\\[a-zA-Z]+\{[a-zA-Z]\}\}', '', cleaned_name)
+
+                    # Now check for unusual characters (allow LaTeX special chars: {}\)
+                    if re.search(r'[^\w\s,.\-\'`{}\\]', cleaned_name):
                         self.warnings.append(
                             f"Entry {key}, {role} #{idx} '{person_str}': Contains unusual characters"
                         )
@@ -305,6 +354,27 @@ class BibTeXCleaner:
                 f"Entry {key} (@{entry_type}): Missing required fields: {', '.join(missing)}"
             )
 
+    def check_unknown_fields(self, key: str, entry: Entry):
+        """Check for unknown/forbidden field names (likely typos)."""
+        for field_name in entry.fields.keys():
+            if field_name.lower() not in KNOWN_FIELDS:
+                # Check if it's a close typo of a known field
+                suggestions = []
+                field_lower = field_name.lower()
+
+                # Check for common typos
+                if 'journal' in field_lower:
+                    suggestions.append('journal or journaltitle')
+                elif 'title' in field_lower:
+                    suggestions.append('title or journaltitle')
+                elif 'addr' in field_lower or 'loc' in field_lower:
+                    suggestions.append('address or location')
+
+                suggestion_text = f" (did you mean: {', '.join(suggestions)}?)" if suggestions else ""
+                self.issues.append(
+                    f"Entry {key}: Unknown field '{field_name}'{suggestion_text}"
+                )
+
     def check_date_validity(self, key: str, entry: Entry):
         """Check date and year validity."""
         # Check year
@@ -325,16 +395,35 @@ class BibTeXCleaner:
         if 'date' in entry.fields:
             date_str = entry.fields['date']
 
-            # Check for valid ISO date format
-            if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
-                self.warnings.append(f"Entry {key}: Date '{date_str}' not in ISO format (YYYY-MM-DD)")
-
-            # Check month validity
-            if re.match(r'^\d{4}-(\d{2})', date_str):
-                month_match = re.match(r'^\d{4}-(\d{2})', date_str)
-                month = int(month_match.group(1))
-                if month < 1 or month > 12:
-                    self.issues.append(f"Entry {key}: Invalid month '{month}' in date")
+            # Check for valid date formats: YYYY, YYYY-MM, or YYYY-MM-DD
+            if re.match(r'^\d{4}$', date_str):
+                # Year only - valid, check range
+                try:
+                    year = int(date_str)
+                    current_year = datetime.now().year
+                    if year < 1000:
+                        self.issues.append(f"Entry {key}: Year '{year}' in date field seems too old")
+                    elif year > current_year + 5:
+                        self.issues.append(f"Entry {key}: Future year '{year}' in date field (>5 years ahead)")
+                except ValueError:
+                    pass
+            elif re.match(r'^\d{4}-\d{2}$', date_str):
+                # Year-month - valid, check month validity
+                month_match = re.match(r'^\d{4}-(\d{2})$', date_str)
+                if month_match:
+                    month = int(month_match.group(1))
+                    if month < 1 or month > 12:
+                        self.issues.append(f"Entry {key}: Invalid month '{month}' in date")
+            elif re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                # Full ISO date - valid, check month validity
+                month_match = re.match(r'^\d{4}-(\d{2})-\d{2}$', date_str)
+                if month_match:
+                    month = int(month_match.group(1))
+                    if month < 1 or month > 12:
+                        self.issues.append(f"Entry {key}: Invalid month '{month}' in date")
+            else:
+                # Invalid format
+                self.warnings.append(f"Entry {key}: Date '{date_str}' not in valid format (use YYYY, YYYY-MM, or YYYY-MM-DD)")
 
         # Check month field
         if 'month' in entry.fields:
@@ -517,6 +606,7 @@ class BibTeXCleaner:
                      check_accents: bool = True,
                      check_names: bool = True,
                      check_entry_types: bool = True,
+                     check_unknown_fields: bool = True,
                      check_dates: bool = True,
                      check_identifiers: bool = True,
                      check_consistency: bool = True,
@@ -544,6 +634,8 @@ class BibTeXCleaner:
                 self.check_name_formatting(key, entry)
             if check_entry_types:
                 self.check_entry_type_fields(key, entry)
+            if check_unknown_fields:
+                self.check_unknown_fields(key, entry)
             if check_dates:
                 self.check_date_validity(key, entry)
             if check_identifiers:
@@ -611,6 +703,7 @@ Examples:
     parser.add_argument('--no-accents', action='store_true', help='Skip accent checking')
     parser.add_argument('--no-names', action='store_true', help='Skip name formatting checking')
     parser.add_argument('--no-entry-types', action='store_true', help='Skip entry type validation')
+    parser.add_argument('--no-unknown-fields', action='store_true', help='Skip unknown field detection')
     parser.add_argument('--no-dates', action='store_true', help='Skip date validation')
     parser.add_argument('--no-identifiers', action='store_true', help='Skip identifier validation')
     parser.add_argument('--no-consistency', action='store_true', help='Skip field consistency')
@@ -636,6 +729,7 @@ Examples:
             check_accents=not args.no_accents,
             check_names=not args.no_names,
             check_entry_types=not args.no_entry_types,
+            check_unknown_fields=not args.no_unknown_fields,
             check_dates=not args.no_dates,
             check_identifiers=not args.no_identifiers,
             check_consistency=not args.no_consistency,
