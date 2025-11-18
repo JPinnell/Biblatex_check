@@ -1,297 +1,254 @@
-# BibTeX Diagnostic Tool
+# BibTeX Diagnostic and Cleaning Tools
 
-A comprehensive Python tool for validating and correcting BibTeX/BibLaTeX files using Crossref and Semantic Scholar as the ground truth. Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
+Two focused Python tools for working with BibTeX/BibLaTeX files:
 
-## Features
+1. **biblatex_diagnostics.py** - Validates entries against online APIs (Crossref + Semantic Scholar)
+2. **biblatex_cleaner.py** - Local formatting checker (coming soon)
 
-### Main Feature: Crossref + Semantic Scholar Validation
-- **Primary: Crossref API**: Fast, high-rate-limit bibliographic database (20 requests/sec)
-- **Fallback: Semantic Scholar**: Academic paper database when Crossref doesn't find a match
-- **Ground Truth Replacement**: If a matching title is found, pulls the authoritative BibTeX entry
-- **Smart Title Matching**: Uses fuzzy matching to handle variations in punctuation and formatting
-- **Rate-Limited Queries**: Handles API rate limits (429 errors) with automatic retry and exponential backoff
+Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
 
-### Additional Diagnostics
+## biblatex_diagnostics.py - API Validation
 
-**Core Validation:**
-- **Entry Type Validation**: Ensures all required fields are present for each entry type (@article, @book, @inproceedings, etc.)
-- **Date/Year Validation**: Checks for impossible dates, future years, invalid months, and malformed date fields
-- **Identifier Validation**: Validates ISBN, ISSN, arXiv ID, and DOI formats; detects placeholder values (TBA, ???, etc.)
-- **Field Consistency**: Warns about old BibTeX conventions (use `journaltitle` instead of `journal` in biblatex)
-- **Completeness Checking**: Suggests recommended fields for scholarly completeness (volume, number, pages, publisher, etc.)
-- **Crossref Validation**: Verifies that crossref, xdata, and related fields point to existing entries
-- **Duplicate Detection**: Finds potential duplicate entries using fuzzy matching on author+title+year
+Automatically compares your BibTeX entries against ground truth from Crossref and Semantic Scholar.
 
-**Character & Formatting:**
-- **DOI Validation**: Checks DOI format and verifies that DOIs resolve correctly
-- **Unicode Character Detection**: Identifies problematic unicode characters like em-dashes (—), en-dashes (–), smart quotes, and ellipses
-- **Ampersand Checking**: Finds unescaped ampersands that should be `\&` in LaTeX
-- **Special Character Validation**: Detects improperly formatted special characters (%, _, etc.)
-- **Accent Formatting**: Detects unescaped accented characters (é, ñ, ü, etc.) that should be LaTeX-formatted (\'e, \~n, \"u)
-- **Name Formatting**: Checks author/editor names for parsing issues, numbers, unusual characters, and inconsistent separators
+### Features
+
+- **Crossref Primary**: Fast bibliographic database (20 requests/sec, no API key needed)
+- **Semantic Scholar Fallback**: Academic search when Crossref doesn't find a match
+- **Automatic Replacement**: Replaces entries with authoritative data from APIs
+- **Smart Title Matching**: Fuzzy matching (70% Jaccard similarity) handles title variations
+- **Dual-API Coverage**: Comprehensive coverage with two complementary databases
+
+### How It Works
+
+For each entry in your `.bib` file:
+1. Extracts the title
+2. Searches Crossref API (primary, very fast at 20 req/sec)
+3. If not found, searches Semantic Scholar API (fallback)
+4. Uses fuzzy matching to compare titles
+5. Reports matches, mismatches, and entries not found
+6. Optionally replaces entries with complete, accurate data from APIs
 
 ## Installation
 
-1. Clone this repository:
-```bash
-git clone <repository-url>
-cd Biblatex_check
-```
+### Requirements
 
-2. Install required packages using conda (or pip):
 ```bash
+# Using conda (recommended)
 conda install pybtex requests
-```
 
-Or with pip:
-```bash
+# Or using pip
 pip install pybtex requests
 ```
-
-### Required Packages
-- **pybtex** (>=0.24.0): BibTeX file parsing and writing
-- **requests** (>=2.28.0): HTTP requests for Semantic Scholar API and DOI validation
 
 ### API Configuration (Optional)
 
 **Crossref Polite Pool (Recommended):**
 
-Crossref offers a "polite pool" with higher rate limits when you identify yourself. Set your email:
+Get better service by identifying yourself:
 
 ```bash
 export CROSSREF_MAILTO="your-email@example.com"
 ```
 
-This gives you access to the polite pool with better performance. The tool already uses 20 requests/sec by default.
-
 **Semantic Scholar API Key (Optional):**
 
-The Semantic Scholar API is used as a fallback. An API key provides better access:
+For better fallback performance:
 
 ```bash
-# Set for current session
 export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"
-
-# Or add to your ~/.bashrc or ~/.zshrc for permanent setup
-echo 'export SEMANTIC_SCHOLAR_API_KEY="your-api-key-here"' >> ~/.bashrc
-source ~/.bashrc
 ```
 
-Get a free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api).
+Get a free key from [Semantic Scholar](https://www.semanticscholar.org/product/api).
 
-## Usage
+## Usage - biblatex_diagnostics.py
 
-### Basic Diagnostics (Read-Only)
+### Validate All Entries
 
-Run all diagnostics on your BibTeX file without making changes:
+Compare all entries against APIs and get a report:
+
+```bash
+python biblatex_diagnostics.py my_references.bib
+```
+
+**Output:**
+```
+Validating 100 entries against APIs...
+============================================================
+
+[1/100] Checking: einstein1905
+[INFO] Searching Crossref for: On the Electrodynamics of Moving Bodies
+[INFO] ✓ Match found on Crossref
+
+[2/100] Checking: fake_paper2023
+[INFO] Searching Crossref for: Machine Learning with Quantum Entanglement
+[INFO] Not found on Crossref
+[INFO] Searching Semantic Scholar for: Machine Learning with Quantum Entanglement
+[INFO] Not found on Semantic Scholar
+
+...
+
+==========================================================
+BIBTEX API VALIDATION REPORT
+============================================================
+
+Matches: 85
+  ✓ einstein1905: Found on crossref
+  ✓ smith2020: Found on semantic_scholar
+  ...
+
+Not Found: 15
+  ✗ fake_paper2023: Not found in any API
+  ...
+
+============================================================
+```
+
+### Update Entries with API Data
+
+Automatically replace entries with authoritative bibliographic data:
+
+```bash
+python biblatex_diagnostics.py my_references.bib --update -o corrected.bib
+```
+
+**This will:**
+1. Search Crossref for each entry (~700 entries in ~35 seconds)
+2. Fall back to Semantic Scholar for entries Crossref doesn't have
+3. Replace matching entries with complete, accurate metadata
+4. Save corrected bibliography to `corrected.bib`
+5. Report statistics (Crossref matches, Semantic Scholar matches, not found)
+
+### Save Report to File
+
+```bash
+python biblatex_diagnostics.py my_references.bib -r validation_report.txt
+```
+
+### Verbose Mode
+
+See each API query in real-time:
+
+```bash
+python biblatex_diagnostics.py my_references.bib -v
+```
+
+### Custom Rate Limiting
+
+Adjust delay between Crossref queries (default: 0.05s for 20 req/sec):
+
+```bash
+python biblatex_diagnostics.py my_references.bib --delay 0.1
+```
+
+## Command-Line Options
+
+```
+usage: biblatex_diagnostics.py [-h] [-o OUTPUT] [-r REPORT_FILE] [-v]
+                                [--delay DELAY] [--update]
+                                input_file
+
+Arguments:
+  input_file            Input BibTeX file
+
+Options:
+  -o, --output         Output file for corrected BibTeX
+  -r, --report-file    Save validation report to file
+  -v, --verbose        Verbose output (show API queries)
+  --delay DELAY        Delay between Crossref queries (default: 0.05s)
+  --update             Update entries with API data (requires -o)
+```
+
+## Examples
+
+### Example 1: Quick Validation
+
+Check which entries match online databases:
 
 ```bash
 python biblatex_diagnostics.py references.bib
 ```
 
-### Save Report to File
+### Example 2: Fix Hallucinated References
 
-Save the diagnostic report to a text file instead of printing to terminal:
-
-```bash
-python biblatex_diagnostics.py references.bib -r report.txt
-```
-
-### Update with API Data
-
-Automatically update entries with Crossref/Semantic Scholar data and save to a new file:
+You have a bibliography with ~700 entries, many potentially hallucinated by an LLM:
 
 ```bash
-python biblatex_diagnostics.py references.bib --update-scholar -o corrected.bib
+python biblatex_diagnostics.py llm_generated.bib --update -o fixed.bib -v
 ```
 
 This will:
-1. Try Crossref first (fast, comprehensive bibliographic data)
-2. Fall back to Semantic Scholar if Crossref doesn't find a match
-3. Update entries with authoritative data
+- Validate all 700 entries against Crossref + Semantic Scholar
+- Replace matches with authoritative data
+- Take ~35-40 seconds (thanks to Crossref's 20 req/sec rate limit)
+- Show progress in real-time with `-v`
 
-### Run Specific Diagnostics
+### Example 3: Generate Validation Report
 
-```bash
-# Only check DOIs and unicode issues (skip API lookups)
-python biblatex_diagnostics.py references.bib --no-scholar
-
-# Only check API matches
-python biblatex_diagnostics.py references.bib --no-doi --no-unicode --no-ampersand --no-special
-```
-
-### Advanced Options
+Create a detailed report for manual review:
 
 ```bash
-# Verbose output with custom delay between API queries
-python biblatex_diagnostics.py references.bib -v --delay 0.05
-
-# Full help
-python biblatex_diagnostics.py --help
+python biblatex_diagnostics.py suspicious_refs.bib -r validation_report.txt -v
 ```
 
-## Command-Line Arguments
+Review `validation_report.txt` to see:
+- Which entries matched (and from which API)
+- Which entries had title mismatches
+- Which entries weren't found in any database
 
-### Required Arguments
-- `input_file`: Path to your BibTeX file
+## Performance
 
-### Optional Arguments
-- `-o, --output`: Output file for corrected BibTeX
-- `-r, --report-file`: Save diagnostic report to file (default: print to terminal)
-- `-v, --verbose`: Enable verbose output
-- `--delay`: Delay between Crossref API queries in seconds (default: 0.05s for 20 req/sec)
+**Speed with Crossref:**
+- 20 requests/sec (default 0.05s delay)
+- 700 entries: ~35 seconds
+- No API key required (polite pool with email recommended)
 
-### Diagnostic Control
-
-**Core Validation Checks:**
-- `--no-entry-types`: Skip entry type and required fields checking
-- `--no-dates`: Skip date/year validity checking
-- `--no-identifiers`: Skip ISBN/ISSN/arXiv format checking
-- `--no-consistency`: Skip field naming consistency checking
-- `--no-completeness`: Skip recommended fields checking
-- `--no-crossrefs`: Skip crossref/xdata/related validation
-- `--no-duplicates`: Skip duplicate entry detection
-
-**Character & Formatting Checks:**
-- `--no-scholar`: Skip API checking (Crossref and Semantic Scholar)
-- `--no-doi`: Skip DOI validation
-- `--no-unicode`: Skip unicode character checking
-- `--no-ampersand`: Skip ampersand checking
-- `--no-special`: Skip special character checking
-- `--no-accents`: Skip accent formatting checking
-- `--no-names`: Skip name formatting checking
-
-### Update Options
-- `--update-scholar`: Update entries with API data: Crossref (primary) → Semantic Scholar (fallback) (requires `-o`)
-
-## Examples
-
-### Example 1: Full Diagnostic Run
-```bash
-python biblatex_diagnostics.py my_references.bib -v
-```
-
-This will check all ~700 entries for:
-- **Core validation**: Entry types, required fields, date/year validity, ISBN/ISSN/arXiv formats
-- **Completeness**: Missing recommended fields, suspiciously bare entries
-- **Consistency**: Field naming (journal vs journaltitle), crossref validity
-- **Duplicates**: Fuzzy matching to find potential duplicates
-- **API Validation**: Cross-reference with Crossref and Semantic Scholar
-- **Character issues**: Unicode, accents, unescaped special characters
-- **Name formatting**: Author/editor parsing issues, inconsistent separators
-
-### Example 2: Clean and Correct References
-```bash
-python biblatex_diagnostics.py messy_refs.bib --update-scholar -o clean_refs.bib
-```
-
-This will:
-- Search Crossref for each entry (fast, 20 req/sec)
-- Fall back to Semantic Scholar if Crossref doesn't find a match
-- Replace matching entries with authoritative data
-- Save the corrected bibliography to `clean_refs.bib`
-
-### Example 3: Quick Unicode Check
-```bash
-python biblatex_diagnostics.py refs.bib --no-scholar --no-doi --no-ampersand --no-special
-```
-
-Quickly check just for unicode issues without API lookups.
-
-### Example 4: Save Report to File
-```bash
-python biblatex_diagnostics.py references.bib -r diagnostics_report.txt
-```
-
-Run all diagnostics and save the warnings and errors to a text file for later review.
-
-### Example 5: Core Validation Only
-```bash
-python biblatex_diagnostics.py references.bib --no-scholar --no-doi --no-unicode --no-ampersand --no-special --no-accents --no-names
-```
-
-Focus on core biblatex validation: entry types, required fields, dates, identifiers, completeness, crossrefs, and duplicates.
-
-### Example 6: Find Duplicates and Broken References
-```bash
-python biblatex_diagnostics.py references.bib --no-scholar --no-doi --no-unicode --no-ampersand --no-special --no-accents --no-names --no-entry-types --no-dates --no-identifiers --no-consistency --no-completeness
-```
-
-Quickly check only for duplicate entries and broken crossrefs without running other validations.
-
-## Output
-
-The tool provides detailed reports including:
-
-- **Issues Found**: Lists all problems detected (invalid DOIs, unicode characters, etc.)
-- **Potential Corrections**: Shows entries that match Crossref/Semantic Scholar records
-- **Summary Statistics**: Total entries checked, issues found, corrections available
-
-Example output:
-```
-Running diagnostics on 15 entries...
-============================================================
-
-[1/15] Checking: einstein1905
-  ✓ Match found on Crossref
-  ✓ Valid DOI: 10.1002/andp.19053221004
-
-[2/15] Checking: smith2023ai
-  ⚠ Entry smith2023ai: Title mismatch
-  ⚠ Field 'title': Contains em-dash ('—')
-
-============================================================
-BIBTEX DIAGNOSTICS REPORT
-============================================================
-
-Found 2 issues:
-  ⚠ Entry smith2023ai: Title mismatch
-  ⚠ Entry smith2023ai, field 'title': Contains em-dash ('—')
-
-Found 1 potential corrections:
-  ℹ einstein1905: Found matching entry on Crossref
-
-============================================================
-```
-
-## How It Works
-
-1. **BibTeX Parsing**: Uses `pybtex` to load and parse your bibliography
-2. **Crossref Integration (Primary)**: Uses the Crossref API to query bibliographic data by title (20 req/sec)
-3. **Semantic Scholar Integration (Fallback)**: Falls back to Semantic Scholar API when Crossref doesn't find a match
-4. **Title Matching**: Implements fuzzy matching (Jaccard similarity) to handle title variations
-5. **Data Validation**: Checks DOIs via HTTP requests, detects unicode patterns, validates LaTeX escaping
-6. **Ground Truth Replacement**: When matches are found, replaces entire entries with API data
-7. **Rate Limiting**: Automatically handles API rate limits (429 errors) with exponential backoff
+**Semantic Scholar Fallback:**
+- With API key: 1 request/sec
+- Without API key: ~0.2 requests/sec
+- Only used for entries Crossref doesn't have
 
 ## Tips for Best Results
 
-- **Crossref Polite Pool**: Set `CROSSREF_MAILTO` environment variable with your email for better service
-- **Fast Processing**: Crossref allows 20 requests/sec, so large files process quickly (default 0.05s delay)
-- **Network Issues**: The tool requires internet access for API calls and DOI validation
-- **Large Files**: With Crossref, 700+ entries can be processed in ~35 seconds (vs minutes with other APIs)
-- **Backup First**: Always keep a backup of your original .bib file before using `--update-scholar`
+- **Set CROSSREF_MAILTO**: Better service from Crossref polite pool
+- **Backup First**: Always keep original `.bib` file before using `--update`
+- **Review Not Found**: Entries not found in either API may be:
+  - Typos or hallucinations
+  - Very recent papers (not yet indexed)
+  - Non-English publications
+  - Books or reports not in academic databases
+- **Title Variations**: Tool uses fuzzy matching (70% similarity) to handle punctuation differences, but manual review is recommended for mismatches
 
 ## Troubleshooting
 
-**API rate limiting issues?**
-- Crossref: The tool uses 0.05s delay (20 req/sec) by default, which is within limits
-- Semantic Scholar (fallback): Automatically retries with exponential backoff (2s, 4s, 8s)
-- Adjust delay if needed: `--delay 0.1` for slower Crossref queries
+**Rate Limiting:**
+- Crossref: Default 0.05s delay (20 req/sec) is within limits
+- Semantic Scholar: Automatic retry with exponential backoff
+- Adjust with `--delay` if needed
 
-**"Title mismatch" warnings?**
-- The tool uses fuzzy matching, but may still miss some matches
-- Manually review these entries
-- Adjust the similarity threshold in `_titles_match()` if needed
+**403 Errors:**
+- Set `CROSSREF_MAILTO` environment variable
+- Check internet connection
 
-**Dependencies not installing?**
-- Ensure you're using Python 3.7+
-- Try: `pip install --upgrade pip` then reinstall requirements
+**Title Mismatches:**
+- Review manually - fuzzy matching isn't perfect
+- Some entries may have significantly different titles online vs in your file
 
-## Contributing
+## Coming Soon: biblatex_cleaner.py
 
-Feel free to submit issues or pull requests for additional features or improvements.
+A separate tool for local formatting checks (no API calls):
+- Unicode character detection
+- LaTeX escaping issues
+- Accent formatting
+- Name formatting
+- Entry type validation
+- Date validation
+- Duplicate detection
 
 ## License
 
-This project is provided as-is for cleaning up and correcting BibTeX files.
+MIT License
+
+## Contributing
+
+Issues and pull requests welcome at https://github.com/JPinnell/Biblatex_check
