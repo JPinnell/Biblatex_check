@@ -39,6 +39,8 @@ class BibTeXAPIChecker:
         self.matches = []
         self.mismatches = []
         self.not_found = []
+        self.field_mismatches = []  # Track field-level mismatches
+        self.suggestions = []  # Track close matches for not-found entries
 
     def log(self, message: str):
         """Print message if verbose mode is enabled."""
@@ -80,9 +82,42 @@ class BibTeXAPIChecker:
             raise
 
     def save_bibtex(self, bib_data: BibliographyData, filepath: str):
-        """Save BibTeX database to file."""
-        writer = Writer()
-        writer.write_file(bib_data, filepath)
+        """Save BibTeX database to file with proper formatting."""
+        with open(filepath, 'w', encoding='utf-8') as f:
+            for key, entry in bib_data.entries.items():
+                # Write entry header
+                f.write(f"@{entry.type}{{{key},\n")
+
+                # Collect all items (persons + fields) to determine last item
+                items = []
+
+                # Add persons (author, editor, etc.)
+                for role, persons in entry.persons.items():
+                    if persons:
+                        names = []
+                        for person in persons:
+                            names.append(str(person))
+                        author_str = ' and '.join(names)
+                        items.append(('person', role, author_str))
+
+                # Add fields
+                for field, value in entry.fields.items():
+                    items.append(('field', field, value))
+
+                # Write all items with commas except the last
+                for idx, (item_type, name, value) in enumerate(items):
+                    is_last = (idx == len(items) - 1)
+                    comma = '' if is_last else ','
+
+                    # Format value with braces
+                    if not value.startswith('{'):
+                        value = '{' + value + '}'
+
+                    f.write(f"    {name} = {value}{comma}\n")
+
+                # Close entry
+                f.write("}\n\n")
+
         self.log(f"Saved corrected BibTeX to: {filepath}")
 
     def _titles_match(self, title1: str, title2: str) -> bool:
@@ -103,6 +138,50 @@ class BibTeXAPIChecker:
         similarity = intersection / union if union > 0 else 0
 
         return similarity > 0.7  # 70% similarity threshold
+
+    def _compare_fields(self, key: str, entry: Entry, api_result: Dict, source: str):
+        """Compare fields between local entry and API result."""
+        issues = []
+
+        # Compare DOI
+        if 'doi' in entry.fields:
+            entry_doi = entry.fields['doi'].lower()
+            api_doi = api_result.get('DOI', '').lower() if source == 'crossref' else api_result.get('doi', '').lower()
+            if api_doi and entry_doi != api_doi:
+                issues.append(f"DOI mismatch: '{entry_doi}' vs '{api_doi}'")
+
+        # Compare year
+        if 'year' in entry.fields or 'date' in entry.fields:
+            entry_year = entry.fields.get('year', entry.fields.get('date', ''))[:4]
+            if source == 'crossref':
+                published = api_result.get('published', {}) or api_result.get('published-print', {})
+                if published and 'date-parts' in published and published['date-parts']:
+                    api_year = str(published['date-parts'][0][0])
+                else:
+                    api_year = None
+            else:  # semantic scholar
+                api_year = str(api_result.get('year', '')) if api_result.get('year') else None
+
+            if api_year and entry_year and entry_year != api_year:
+                issues.append(f"Year mismatch: '{entry_year}' vs '{api_year}'")
+
+        # Compare authors (basic check - just count)
+        if 'author' in entry.persons:
+            entry_author_count = len(entry.persons['author'])
+            if source == 'crossref':
+                api_author_count = len(api_result.get('author', []))
+            else:  # semantic scholar
+                api_author_count = len(api_result.get('authors', []))
+
+            if api_author_count and entry_author_count != api_author_count:
+                issues.append(f"Author count mismatch: {entry_author_count} vs {api_author_count}")
+
+        if issues:
+            self.field_mismatches.append({
+                'entry_id': key,
+                'source': source,
+                'issues': issues
+            })
 
     def check_crossref(self, key: str, entry: Entry, update: bool = False) -> Optional[Entry]:
         """Check entry against Crossref API."""
@@ -138,15 +217,32 @@ class BibTeXAPIChecker:
                         'title': title,
                         'api_title': crossref_title
                     })
+                    # Compare fields even if not updating
+                    self._compare_fields(key, entry, result, 'crossref')
                     if update:
                         return self._crossref_to_entry(result, key, entry.type)
+                    return result  # Return result for suggestion purposes
                 else:
-                    self.log(f"Title mismatch")
-                    self.mismatches.append({
+                    self.log(f"Title mismatch - but tracking as suggestion")
+                    # Track as suggestion even if not exact match
+                    suggestion_title = ''.join(result.get('title', []))
+                    suggestion_authors = []
+                    for author in result.get('author', [])[:3]:  # First 3 authors
+                        given = author.get('given', '')
+                        family = author.get('family', '')
+                        if given and family:
+                            suggestion_authors.append(f"{given} {family}")
+                        elif family:
+                            suggestion_authors.append(family)
+
+                    self.suggestions.append({
                         'entry_id': key,
-                        'title': title,
-                        'api_title': crossref_title
+                        'source': 'crossref',
+                        'suggestion': suggestion_title,
+                        'authors': ', '.join(suggestion_authors) if suggestion_authors else 'N/A',
+                        'doi': result.get('DOI', 'N/A')
                     })
+                    return None
             else:
                 self.log(f"Not found on Crossref")
 
@@ -191,6 +287,8 @@ class BibTeXAPIChecker:
                         'title': title,
                         'api_title': ss_title
                     })
+                    # Compare fields even if not updating
+                    self._compare_fields(key, entry, result, 'semantic_scholar')
                     if update:
                         return self._semantic_scholar_to_entry(result, key, entry.type)
                 else:
@@ -210,18 +308,26 @@ class BibTeXAPIChecker:
 
     def _crossref_to_entry(self, crossref_result: Dict, entry_key: str, entry_type: str) -> Entry:
         """Convert Crossref result to pybtex Entry format."""
-        # Determine entry type
+        # Determine entry type - prefer original type when sensible
         cr_type = crossref_result.get('type', '').lower()
-        type_mapping = {
-            'journal-article': 'article',
-            'proceedings-article': 'inproceedings',
-            'book-chapter': 'incollection',
-            'book': 'book',
-            'monograph': 'book',
-            'dissertation': 'phdthesis',
-            'report': 'techreport',
-        }
-        etype = type_mapping.get(cr_type, entry_type or 'article')
+        container_title = crossref_result.get('container-title', [])
+
+        # If there's a container-title, it's likely an article/chapter, not a book
+        # Preserve the original type in these cases
+        if container_title and entry_type in ['article', 'inproceedings', 'incollection']:
+            etype = entry_type
+        else:
+            # Otherwise use Crossref's type mapping
+            type_mapping = {
+                'journal-article': 'article',
+                'proceedings-article': 'inproceedings',
+                'book-chapter': 'incollection',
+                'book': 'book',
+                'monograph': 'book',
+                'dissertation': 'phdthesis',
+                'report': 'techreport',
+            }
+            etype = type_mapping.get(cr_type, entry_type or 'article')
 
         # Create fields
         title = ''.join(crossref_result.get('title', []))
@@ -399,6 +505,13 @@ class BibTeXAPIChecker:
         for match in self.matches:
             report.append(f"  ✓ {match['entry_id']}: Found on {match['source']}")
 
+        if self.field_mismatches:
+            report.append(f"\nField Mismatches: {len(self.field_mismatches)}")
+            for fm in self.field_mismatches:
+                report.append(f"  ⚠ {fm['entry_id']} ({fm['source']}):")
+                for issue in fm['issues']:
+                    report.append(f"      - {issue}")
+
         if self.mismatches:
             report.append(f"\nTitle Mismatches: {len(self.mismatches)}")
             for mm in self.mismatches:
@@ -408,6 +521,15 @@ class BibTeXAPIChecker:
             report.append(f"\nNot Found: {len(self.not_found)}")
             for nf in self.not_found:
                 report.append(f"  ✗ {nf}: Not found in any API")
+
+        if self.suggestions:
+            report.append(f"\nSuggestions (possible matches): {len(self.suggestions)}")
+            for sug in self.suggestions:
+                report.append(f"  💡 {sug['entry_id']} - Did you mean?")
+                report.append(f"      Title: {sug['suggestion']}")
+                report.append(f"      Authors: {sug['authors']}")
+                report.append(f"      DOI: {sug['doi']}")
+                report.append(f"      Source: {sug['source']}")
 
         report.append("\n" + "=" * 60)
         return "\n".join(report)
