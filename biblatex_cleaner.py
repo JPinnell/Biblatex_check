@@ -98,6 +98,7 @@ BIBTEX_TO_BIBLATEX = {
     'journal': 'journaltitle',
     'year': 'date',
     'address': 'location',
+    'number': 'issue',
 }
 
 # Field name mappings: BibLaTeX -> BibTeX
@@ -118,7 +119,7 @@ KNOWN_FIELDS = {
     # BibLaTeX-specific
     'journaltitle', 'date', 'location', 'maintitle', 'mainsubtitle',
     'subtitle', 'titleaddon', 'language', 'origlanguage',
-    'eventtitle', 'eventdate', 'venue',
+    'eventtitle', 'eventdate', 'venue', 'issue',
 
     # Identifiers
     'doi', 'eprint', 'eprinttype', 'eprintclass',
@@ -146,11 +147,11 @@ KNOWN_FIELDS = {
     'userd', 'usere', 'userf', 'verba', 'verbb', 'verbc',
 }
 
-# Recommended fields for completeness
+# Recommended fields for completeness (can use same alternative format as required fields)
 RECOMMENDED_FIELDS = {
-    'article': ['volume', 'number', 'pages', 'doi'],
-    'book': ['publisher', 'location', 'isbn'],
-    'inproceedings': ['pages', 'publisher', 'doi'],
+    'article': ['volume', ['number', 'issue'], 'pages', 'doi'],  # BibTeX uses 'number', BibLaTeX uses 'issue'
+    'book': [['publisher'], ['location', 'address'], 'isbn'],    # BibTeX uses 'address', BibLaTeX uses 'location'
+    'inproceedings': ['pages', ['publisher'], 'doi'],
 }
 
 
@@ -512,12 +513,27 @@ class BibTeXCleaner:
             )
 
     def check_completeness(self, key: str, entry: Entry):
-        """Check for recommended fields."""
+        """Check for recommended fields (accepts both BibTeX and BibLaTeX alternatives)."""
         entry_type = entry.type.lower()
 
         if entry_type in RECOMMENDED_FIELDS:
             recommended = RECOMMENDED_FIELDS[entry_type]
-            missing = [f for f in recommended if f not in entry.fields]
+            missing = []
+
+            for field_spec in recommended:
+                if isinstance(field_spec, list):
+                    # Alternative fields - at least one must be present
+                    alternatives = field_spec
+                    if not any(alt in entry.fields for alt in alternatives):
+                        # Don't show "OR" for single-item lists
+                        if len(alternatives) == 1:
+                            missing.append(alternatives[0])
+                        else:
+                            missing.append(' OR '.join(alternatives))
+                else:
+                    # Single recommended field
+                    if field_spec not in entry.fields:
+                        missing.append(field_spec)
 
             if missing:
                 self.warnings.append(
