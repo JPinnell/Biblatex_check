@@ -182,16 +182,51 @@ class BibTeXAPIChecker:
                 if entry_journal_clean != api_journal_clean:
                     issues.append(f"Journal mismatch: '{entry_journal}' vs '{api_journal}'")
 
-        # Compare authors (basic check - just count)
+        # Compare authors (check both count and names)
         if 'author' in entry.persons:
-            entry_author_count = len(entry.persons['author'])
+            entry_authors = entry.persons['author']
+            entry_author_count = len(entry_authors)
+            # Extract entry author last names
+            entry_lastnames = []
+            for person in entry_authors:
+                person_str = str(person)
+                parts = person_str.split()
+                if parts:
+                    if ',' in person_str:
+                        entry_lastnames.append(parts[0].rstrip(',').lower())
+                    else:
+                        entry_lastnames.append(parts[-1].lower())
+            # Extract API author last names
+            api_lastnames = []
+            api_author_count = 0
             if source == 'crossref':
-                api_author_count = len(api_result.get('author', []))
+                api_authors = api_result.get('author', [])
+                api_author_count = len(api_authors)
+                for author in api_authors:
+                    family = author.get('family', '').lower()
+                    if family:
+                        api_lastnames.append(family)
             else:  # semantic scholar
-                api_author_count = len(api_result.get('authors', []))
-
+                api_authors = api_result.get('authors', [])
+                api_author_count = len(api_authors)
+                for author in api_authors:
+                    name = author.get('name', '')
+                    parts = name.split()
+                    if parts:
+                        api_lastnames.append(parts[-1].lower())
+            # Compare author count
             if api_author_count and entry_author_count != api_author_count:
                 issues.append(f"Author count mismatch: {entry_author_count} vs {api_author_count}")
+            # Compare author names (check for mismatches in last names)
+            if api_lastnames and entry_lastnames:
+                entry_set = set(entry_lastnames)
+                api_set = set(api_lastnames)
+                extra_in_entry = entry_set - api_set
+                if extra_in_entry:
+                    issues.append(f"Author(s) in entry but not in API: {', '.join(sorted(extra_in_entry))}")
+                missing_from_entry = api_set - entry_set
+                if missing_from_entry:
+                    issues.append(f"Author(s) in API but not in entry: {', '.join(sorted(missing_from_entry))}")
 
         if issues:
             self.field_mismatches.append({
