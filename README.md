@@ -1,4 +1,4 @@
-# BibTeX Diagnostic and Cleaning Tools
+# BibLaTeX Diagnostic and Cleaning Tools
 
 Three focused Python tools for working with BibTeX/BibLaTeX files:
 
@@ -6,7 +6,7 @@ Three focused Python tools for working with BibTeX/BibLaTeX files:
 2. **biblatex_cleaner.py** - Local formatting validator (no API calls, works offline)
 3. **biblatex_diagnostics.py** - Validates entries against online APIs (Crossref + Semantic Scholar)
 
-Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
+Perfect for cleaning up bibliographies with syntax errors, formatting errors or incorrect references from LLMs.
 
 ## ⚠️ IMPORTANT: Tool Order Matters
 
@@ -14,13 +14,13 @@ Perfect for cleaning up bibliographies with hallucinated or incorrect references
 
 ```bash
 # Step 1: Check syntax (finds parse-blocking errors)
-python3 biblatex_syntax_checker.py mybib.bib
+python3 biblatex_syntax_checker.py test.bib
 
 # Step 2: Check formatting (finds semantic issues)
-python3 biblatex_cleaner.py mybib.bib
+python3 biblatex_cleaner.py test_syntax_corrected.bib
 
 # Step 3: Validate against APIs (checks against online databases)
-python3 biblatex_diagnostics.py mybib.bib
+python3 biblatex_diagnostics.py test_formatting_corrected.bib
 ```
 
 If you skip Step 1, the other tools will crash on syntax errors with minimal information.
@@ -47,19 +47,19 @@ The other tools use pybtex to parse BibTeX files, which crashes immediately on t
 Check syntax:
 
 ```bash
-python3 biblatex_syntax_checker.py references.bib
+python3 biblatex_syntax_checker.py test.bib
 ```
 
 Save report to file:
 
 ```bash
-python3 biblatex_syntax_checker.py references.bib -r syntax_report.txt
+python3 biblatex_syntax_checker.py test.bib -r syntax_report.txt
 ```
 
 ### Example Output
 
 ```
-Checking syntax of: references.bib
+Checking syntax of: test.bib
 ============================================================
 
 ============================================================
@@ -163,7 +163,7 @@ Get a free key from [Semantic Scholar](https://www.semanticscholar.org/product/a
 Compare all entries against APIs and get a report:
 
 ```bash
-python biblatex_diagnostics.py my_references.bib
+python biblatex_diagnostics.py test_formatting_corrected.bib
 ```
 
 **Output:**
@@ -204,7 +204,7 @@ Not Found: 15
 Automatically replace entries with authoritative bibliographic data:
 
 ```bash
-python biblatex_diagnostics.py my_references.bib --update -o corrected.bib
+python biblatex_diagnostics.py test_formatting_corrected.bib --update -o test_fixed.bib
 ```
 
 **This will:**
@@ -217,7 +217,7 @@ python biblatex_diagnostics.py my_references.bib --update -o corrected.bib
 ### Save Report to File
 
 ```bash
-python biblatex_diagnostics.py my_references.bib -r validation_report.txt
+python biblatex_diagnostics.py test_formatting_corrected.bib -r validation_report.txt
 ```
 
 ### Verbose Mode
@@ -225,7 +225,7 @@ python biblatex_diagnostics.py my_references.bib -r validation_report.txt
 See each API query in real-time:
 
 ```bash
-python biblatex_diagnostics.py my_references.bib -v
+python biblatex_diagnostics.py test_formatting_corrected.bib -v
 ```
 
 ### Custom Rate Limiting
@@ -261,19 +261,19 @@ Options:
 Check which entries match online databases:
 
 ```bash
-python biblatex_diagnostics.py references.bib
+python biblatex_diagnostics.py test_formatting_corrected.bib
 ```
 
 ### Example 2: Fix Hallucinated References
 
-You have a bibliography with ~700 entries, many potentially hallucinated by an LLM:
+You have a bibliography with many potentially hallucinated by an LLM:
 
 ```bash
-python biblatex_diagnostics.py llm_generated.bib --update -o fixed.bib -v
+python biblatex_diagnostics.py test_formatting_corrected.bib --update -o test_fixed.bib -v
 ```
 
 This will:
-- Validate all 700 entries against Crossref + Semantic Scholar
+- Validate all entries against Crossref + Semantic Scholar
 - Replace matches with authoritative data
 - Take ~35-40 seconds (thanks to Crossref's 20 req/sec rate limit)
 - Show progress in real-time with `-v`
@@ -283,7 +283,7 @@ This will:
 Create a detailed report for manual review:
 
 ```bash
-python biblatex_diagnostics.py suspicious_refs.bib -r validation_report.txt -v
+python biblatex_diagnostics.py test_formatting_corrected.bib -r validation_report.txt -v
 ```
 
 Review `validation_report.txt` to see:
@@ -295,7 +295,6 @@ Review `validation_report.txt` to see:
 
 **Speed with Crossref:**
 - 20 requests/sec (default 0.05s delay)
-- 700 entries: ~35 seconds
 - No API key required (polite pool with email recommended)
 
 **Semantic Scholar Fallback:**
@@ -356,23 +355,23 @@ Checks local formatting issues without making any API calls. Fast and works offl
 Run all formatting checks:
 
 ```bash
-python biblatex_cleaner.py my_references.bib
+python biblatex_cleaner.py test_syntax_corrected.bib
 ```
 
 Save report to file:
 
 ```bash
-python biblatex_cleaner.py my_references.bib -r formatting_report.txt
+python biblatex_cleaner.py test_syntax_corrected.bib -r formatting_report.txt
 ```
 
 Skip specific checks:
 
 ```bash
 # Skip completeness and duplicate checks (faster)
-python biblatex_cleaner.py refs.bib --no-completeness --no-duplicates
+python biblatex_cleaner.py test_syntax_corrected.bib --no-completeness --no-duplicates
 
 # Only check critical issues (no warnings)
-python biblatex_cleaner.py refs.bib --no-completeness --no-consistency
+python biblatex_cleaner.py test_syntax_corrected.bib --no-completeness --no-consistency
 ```
 
 ### Command-Line Options
@@ -431,7 +430,7 @@ Warnings: 25
 
 - **Very fast**: No network calls, purely local validation
 - Works offline
-- 700 entries: < 2 seconds
+- 500 entries: < 2 seconds
 
 ## License
 
