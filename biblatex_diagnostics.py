@@ -191,11 +191,28 @@ class BibTeXAPIChecker:
 
         self.log(f"Searching Crossref for: {title}")
 
+        # Get author names for additional search strategies
+        author_names = []
+        if 'author' in entry.persons:
+            for person in entry.persons['author']:
+                # Get last name
+                person_str = str(person)
+                parts = person_str.split()
+                if parts:
+                    author_names.append(parts[-1])  # Last name
+
+        entry_year = None
+        if 'year' in entry.fields:
+            entry_year = entry.fields['year'][:4]
+        elif 'date' in entry.fields:
+            entry_year = entry.fields['date'][:4]
+
         try:
+            # Strategy 1: Search by title (get top 5 results)
             search_url = f"{CROSSREF_API_BASE}/works"
             params = {
                 'query.title': title,
-                'rows': 1,
+                'rows': 5,  # Get multiple results for suggestions
                 'select': 'DOI,title,author,published,container-title,volume,issue,page,publisher,ISBN,ISSN,type'
             }
             headers = {'User-Agent': f'biblatex-diagnostics/1.0 (mailto:{MAILTO_EMAIL})'}
@@ -204,9 +221,15 @@ class BibTeXAPIChecker:
             response.raise_for_status()
             data = response.json()
 
+            # Track seen DOIs across all searches for this entry
+            seen_dois = set()
+
             if data.get('message') and data['message'].get('items') and len(data['message']['items']) > 0:
-                result = data['message']['items'][0]
-                crossref_title = ''.join(result.get('title', [''])).lower()
+                results = data['message']['items']
+
+                # Check first result for exact match
+                first_result = results[0]
+                crossref_title = ''.join(first_result.get('title', [''])).lower()
                 entry_title = title.lower()
 
                 if self._titles_match(entry_title, crossref_title):
@@ -218,34 +241,108 @@ class BibTeXAPIChecker:
                         'api_title': crossref_title
                     })
                     # Compare fields even if not updating
-                    self._compare_fields(key, entry, result, 'crossref')
+                    self._compare_fields(key, entry, first_result, 'crossref')
                     if update:
-                        return self._crossref_to_entry(result, key, entry.type)
-                    return result  # Return result for suggestion purposes
+                        return self._crossref_to_entry(first_result, key, entry.type)
+                    return first_result  # Return result for suggestion purposes
                 else:
-                    self.log(f"Title mismatch - but tracking as suggestion")
-                    # Track as suggestion even if not exact match
-                    suggestion_title = ''.join(result.get('title', []))
-                    suggestion_authors = []
-                    for author in result.get('author', [])[:3]:  # First 3 authors
-                        given = author.get('given', '')
-                        family = author.get('family', '')
-                        if given and family:
-                            suggestion_authors.append(f"{given} {family}")
-                        elif family:
-                            suggestion_authors.append(family)
+                    self.log(f"No exact match - generating suggestions")
+                    for result in results[:5]:  # Top 5 results
+                        doi = result.get('DOI', '')
+                        if doi and doi not in seen_dois:
+                            seen_dois.add(doi)
 
-                    self.suggestions.append({
-                        'entry_id': key,
-                        'source': 'crossref',
-                        'suggestion': suggestion_title,
-                        'authors': ', '.join(suggestion_authors) if suggestion_authors else 'N/A',
-                        'doi': result.get('DOI', 'N/A')
-                    })
-                    return None
-            else:
-                self.log(f"Not found on Crossref")
+                            suggestion_title = ''.join(result.get('title', []))
+                            suggestion_authors = []
+                            for author in result.get('author', [])[:3]:  # First 3 authors
+                                given = author.get('given', '')
+                                family = author.get('family', '')
+                                if given and family:
+                                    suggestion_authors.append(f"{given} {family}")
+                                elif family:
+                                    suggestion_authors.append(family)
 
+                            # Extract year and journal
+                            published = result.get('published', {}) or result.get('published-print', {})
+                            suggestion_year = 'N/A'
+                            if published and 'date-parts' in published and published['date-parts']:
+                                date_parts = published['date-parts'][0]
+                                if date_parts and len(date_parts) > 0:
+                                    suggestion_year = str(date_parts[0])
+
+                            container_title = result.get('container-title', [])
+                            suggestion_journal = container_title[0] if container_title else 'N/A'
+
+                            self.suggestions.append({
+                                'entry_id': key,
+                                'source': 'crossref',
+                                'suggestion': suggestion_title,
+                                'authors': ', '.join(suggestion_authors) if suggestion_authors else 'N/A',
+                                'year': suggestion_year,
+                                'journal': suggestion_journal,
+                                'doi': result.get('DOI', 'N/A'),
+                                'strategy': 'title_search'
+                            })
+
+            # Strategy 2: If we have author names, try searching by author + title keywords
+            if author_names and not self.matches:
+                self.log(f"Trying author-based search with {author_names[0]}")
+                # Take key words from title
+                title_words = title.lower().split()
+                # Remove common words
+                stop_words = {'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'and', 'or', 'but'}
+                key_words = [w for w in title_words if w not in stop_words and len(w) > 3][:3]
+
+                if key_words:
+                    query = f"{' '.join(key_words)} {author_names[0]}"
+                    params = {
+                        'query': query,
+                        'rows': 3,
+                        'select': 'DOI,title,author,published,container-title,volume,issue,page,publisher,ISBN,ISSN,type'
+                    }
+
+                    response = requests.get(search_url, params=params, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    if data.get('message') and data['message'].get('items'):
+                        for result in data['message']['items'][:3]:
+                            doi = result.get('DOI', '')
+                            if doi and doi not in seen_dois:
+                                seen_dois.add(doi)
+
+                                suggestion_title = ''.join(result.get('title', []))
+                                suggestion_authors = []
+                                for author in result.get('author', [])[:3]:
+                                    given = author.get('given', '')
+                                    family = author.get('family', '')
+                                    if given and family:
+                                        suggestion_authors.append(f"{given} {family}")
+                                    elif family:
+                                        suggestion_authors.append(family)
+
+                                published = result.get('published', {}) or result.get('published-print', {})
+                                suggestion_year = 'N/A'
+                                if published and 'date-parts' in published and published['date-parts']:
+                                    date_parts = published['date-parts'][0]
+                                    if date_parts and len(date_parts) > 0:
+                                        suggestion_year = str(date_parts[0])
+
+                                container_title = result.get('container-title', [])
+                                suggestion_journal = container_title[0] if container_title else 'N/A'
+
+                                self.suggestions.append({
+                                    'entry_id': key,
+                                    'source': 'crossref',
+                                    'suggestion': suggestion_title,
+                                    'authors': ', '.join(suggestion_authors) if suggestion_authors else 'N/A',
+                                    'year': suggestion_year,
+                                    'journal': suggestion_journal,
+                                    'doi': result.get('DOI', 'N/A'),
+                                    'strategy': 'author_keywords'
+                                })
+
+            return None
         except Exception as e:
             self.log(f"Crossref error: {str(e)}")
 
@@ -524,12 +621,24 @@ class BibTeXAPIChecker:
 
         if self.suggestions:
             report.append(f"\nSuggestions (possible matches): {len(self.suggestions)}")
+            # Group suggestions by entry_id
+            by_entry = {}
             for sug in self.suggestions:
-                report.append(f"  💡 {sug['entry_id']} - Did you mean?")
-                report.append(f"      Title: {sug['suggestion']}")
-                report.append(f"      Authors: {sug['authors']}")
-                report.append(f"      DOI: {sug['doi']}")
-                report.append(f"      Source: {sug['source']}")
+                entry_id = sug['entry_id']
+                if entry_id not in by_entry:
+                    by_entry[entry_id] = []
+                by_entry[entry_id].append(sug)
+
+            for entry_id, entry_suggestions in by_entry.items():
+                report.append(f"\n  💡 {entry_id} - Did you mean one of these?")
+                for idx, sug in enumerate(entry_suggestions[:5], 1):  # Show up to 5 suggestions
+                    report.append(f"      [{idx}] {sug['suggestion']}")
+                    report.append(f"          Authors: {sug['authors']}")
+                    report.append(f"          Year: {sug['year']}")
+                    report.append(f"          Journal: {sug['journal']}")
+                    report.append(f"          DOI: {sug['doi']}")
+                    strategy_label = sug.get('strategy', 'title_search')
+                    report.append(f"          (Found via: {strategy_label})")
 
         report.append("\n" + "=" * 60)
         return "\n".join(report)
