@@ -3,7 +3,7 @@
 Two focused Python tools for working with BibTeX/BibLaTeX files:
 
 1. **biblatex_diagnostics.py** - Validates entries against online APIs (Crossref + Semantic Scholar)
-2. **biblatex_cleaner.py** - Local formatting checker (coming soon)
+2. **biblatex_cleaner.py** - Local formatting validator (no API calls, works offline)
 
 Perfect for cleaning up bibliographies with hallucinated or incorrect references from LLMs.
 
@@ -234,16 +234,109 @@ Review `validation_report.txt` to see:
 - Review manually - fuzzy matching isn't perfect
 - Some entries may have significantly different titles online vs in your file
 
-## Coming Soon: biblatex_cleaner.py
+## biblatex_cleaner.py - Local Formatting Validator
 
-A separate tool for local formatting checks (no API calls):
-- Unicode character detection
-- LaTeX escaping issues
-- Accent formatting
-- Name formatting
-- Entry type validation
-- Date validation
-- Duplicate detection
+Checks local formatting issues without making any API calls. Fast and works offline.
+
+### Features
+
+**Character & Formatting:**
+- Unicode character detection (em-dashes, smart quotes, ellipsis)
+- Unescaped ampersands (`&` → `\&`)
+- Special character issues (`%`, `_`)
+- Accent formatting (é → `\'e`, ñ → `\~n`)
+- Name formatting problems
+
+**Entry Validation:**
+- Entry type validation (required fields for @article, @book, etc.)
+- Date/year validity
+- ISBN/ISSN/arXiv/DOI format validation
+- Field consistency (journal vs journaltitle)
+- Completeness checking (recommended fields)
+- Crossref validation (verify references exist)
+- Duplicate detection (fuzzy matching)
+
+### Usage
+
+Run all formatting checks:
+
+```bash
+python biblatex_cleaner.py my_references.bib
+```
+
+Save report to file:
+
+```bash
+python biblatex_cleaner.py my_references.bib -r formatting_report.txt
+```
+
+Skip specific checks:
+
+```bash
+# Skip completeness and duplicate checks (faster)
+python biblatex_cleaner.py refs.bib --no-completeness --no-duplicates
+
+# Only check critical issues (no warnings)
+python biblatex_cleaner.py refs.bib --no-completeness --no-consistency
+```
+
+### Command-Line Options
+
+```
+Options:
+  -r, --report-file    Save report to file
+  -v, --verbose        Verbose output
+
+Skip checks:
+  --no-unicode         Skip unicode character checking
+  --no-ampersand       Skip ampersand checking
+  --no-special         Skip special character checking
+  --no-accents         Skip accent formatting checking
+  --no-names           Skip name formatting checking
+  --no-entry-types     Skip entry type validation
+  --no-dates           Skip date validation
+  --no-identifiers     Skip identifier format validation
+  --no-consistency     Skip field consistency checking
+  --no-completeness    Skip completeness checking
+  --no-crossrefs       Skip crossref validation
+  --no-duplicates      Skip duplicate detection
+```
+
+### Example Output
+
+```
+Validating 100 entries (local checks only, no API calls)...
+============================================================
+
+[1/100] Checking: einstein1905
+[2/100] Checking: smith2023
+...
+
+============================================================
+BIBTEX FORMATTING REPORT
+============================================================
+
+Issues Found: 15
+  ✗ Entry smith2023, field 'title': Contains em-dash ('—')
+  ✗ Entry jones2020, field 'author': Contains unescaped ampersand (use \&)
+  ✗ Entry doe2021 (@article): Missing required fields: journaltitle
+  ✗ Entry fake2022: Invalid year '2050' (>5 years ahead)
+  ...
+
+Warnings: 25
+  ⚠ Entry old_style2019: Use 'journaltitle' instead of 'journal' in biblatex
+  ⚠ Entry incomplete2020 (@article): Missing recommended fields: volume, number
+  ⚠ Possible duplicate: 'paper_v1' and 'paper_v2' (95% similar)
+  ...
+
+============================================================
+```
+
+### Performance
+
+- **Very fast**: No network calls, purely local validation
+- Works offline
+- 700 entries: < 2 seconds
 
 ## License
 
