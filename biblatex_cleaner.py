@@ -485,6 +485,37 @@ class BibTeXCleaner:
             if url.lower() in ['tba', 'todo', '???', 'unknown', 'pending']:
                 self.issues.append(f"Entry {key}: Placeholder value in url: '{url}'")
 
+    def check_page_format(self, key: str, entry: Entry):
+        """
+        Check page range format.
+        Single page numbers (e.g., '077401') are fine.
+        Page ranges should use double hyphen (e.g., '123--456' not '123-456').
+        """
+        if 'pages' not in entry.fields:
+            return
+
+        pages = entry.fields['pages']
+
+        # If already has double hyphen, it's correct
+        if '--' in pages:
+            return
+
+        # Check if it has a single hyphen (potential page range with wrong format)
+        # But we need to distinguish between:
+        # - Single page numbers (no hyphen): '077401' - FINE
+        # - Page ranges with single hyphen: '123-456' - NEEDS FIXING
+        # - Page ranges with en-dash or em-dash: '123–456' or '123—456' - NEEDS FIXING
+
+        if '-' in pages or '–' in pages or '—' in pages:
+            # This looks like a page range with single hyphen
+            # Check if it's actually a range (has digits on both sides of the hyphen)
+            if re.search(r'\d+[-–—]\d+', pages):
+                # This is a page range with single hyphen/dash
+                self.warnings.append(
+                    f"Entry {key}: Page range uses single hyphen/dash. Use double hyphen '--' instead: '{pages}'"
+                )
+            # Otherwise, it might be something like a hyphenated article number, which is fine
+
     def check_field_consistency(self, key: str, entry: Entry):
         """Check field naming consistency (BibTeX vs BibLaTeX)."""
         # Check if entry mixes BibTeX and BibLaTeX field names
@@ -706,6 +737,7 @@ class BibTeXCleaner:
                 self.check_date_validity(key, entry)
             if check_identifiers:
                 self.check_identifier_formats(key, entry)
+                self.check_page_format(key, entry)
             if check_consistency:
                 self.check_field_consistency(key, entry)
             if check_completeness:
