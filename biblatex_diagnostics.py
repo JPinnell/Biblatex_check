@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BibTeX API Diagnostics Tool
-Validates and corrects BibTeX entries by comparing against online sources (Crossref and Semantic Scholar).
+Validates and corrects BibTeX entries by comparing against online sources (Crossref, Semantic Scholar, and Scholarly).
 """
 
 import re
@@ -14,6 +14,15 @@ import unicodedata
 from typing import Dict, List, Optional, Tuple
 from pybtex.database import parse_file, BibliographyData, Entry, Person
 from pybtex.database.output.bibtex import Writer
+
+# Try to import scholarly (optional dependency)
+try:
+    from scholarly import scholarly, ProxyGenerator
+    SCHOLARLY_AVAILABLE = True
+except ImportError:
+    SCHOLARLY_AVAILABLE = False
+    scholarly = None
+    ProxyGenerator = None
 
 # Crossref API endpoint (primary)
 CROSSREF_API_BASE = "https://api.crossref.org"
@@ -96,6 +105,129 @@ def clean_api_field(text: str) -> str:
     # Replace &amp; with \&
     text = text.replace('&amp;', '\\&')
     return text
+
+
+def normalize_journal_name(journal: str) -> str:
+    """
+    Normalize journal name for comparison by:
+    - Converting to lowercase
+    - Removing LaTeX braces
+    - Normalizing ampersands
+    - Removing leading 'The'
+    - Stripping whitespace
+
+    Examples:
+        '{IBM} Journal' -> 'ibm journal'
+        'The Physics of Fluids' -> 'physics of fluids'
+        'Particle {\&} Systems' -> 'particle & systems'
+    """
+    # Convert to lowercase
+    journal = journal.lower()
+
+    # Remove LaTeX braces
+    journal = journal.replace('{', '').replace('}', '')
+
+    # Normalize ampersands
+    journal = normalize_ampersand(journal)
+
+    # Remove leading 'The ' or 'the '
+    journal = journal.strip()
+    if journal.startswith('the '):
+        journal = journal[4:].strip()
+
+    # Normalize whitespace
+    journal = ' '.join(journal.split())
+
+    return journal
+
+
+def journals_match_fuzzy(journal1: str, journal2: str, threshold: float = 0.75) -> bool:
+    """
+    Compare two journal names with fuzzy matching to handle:
+    - Abbreviations (e.g., 'Lab on a Chip' vs 'Lab Chip')
+    - Articles ('The Physics of Fluids' vs 'Physics of Fluids')
+    - Formatting differences (braces, ampersands)
+
+    Args:
+        journal1: First journal name
+        journal2: Second journal name
+        threshold: Similarity threshold (0.0 to 1.0)
+
+    Returns:
+        True if journals match within threshold
+    """
+    # Normalize both journal names
+    norm1 = normalize_journal_name(journal1)
+    norm2 = normalize_journal_name(journal2)
+
+    # Exact match after normalization
+    if norm1 == norm2:
+        return True
+
+    # Calculate Jaccard similarity for fuzzy matching
+    words1 = set(norm1.split())
+    words2 = set(norm2.split())
+
+    if not words1 or not words2:
+        return False
+
+    intersection = len(words1.intersection(words2))
+    union = len(words1.union(words2))
+    similarity = intersection / union if union > 0 else 0
+
+    # Check if one is a substring of the other (for abbreviations)
+    # e.g., "Lab Chip" is contained in "Lab on a Chip"
+    if norm1 in norm2 or norm2 in norm1:
+        # If one is substring of the other, be more lenient
+        return similarity > 0.5
+
+    # For abbreviations where all words of the shorter match the longer
+    # e.g., "Lab Chip" vs "Lab on a Chip" - all words of "Lab Chip" are in "Lab on a Chip"
+    smaller_set = words1 if len(words1) < len(words2) else words2
+    larger_set = words2 if len(words1) < len(words2) else words1
+
+    # If all words from the smaller set are in the larger set, and there's significant overlap
+    if smaller_set.issubset(larger_set):
+        return True
+
+    return similarity >= threshold
+
+
+def authors_initials_match(initials1: str, initials2: str) -> bool:
+    """
+    Check if two sets of initials match, being lenient with:
+    - Full first name vs initials (e.g., 'S' matches 'Scot' or 'SC')
+    - Different numbers of initials (e.g., 'S' matches 'SC')
+
+    Args:
+        initials1: First set of initials (e.g., 'S', 'SC', 'SJC')
+        initials2: Second set of initials
+
+    Returns:
+        True if initials are compatible
+    """
+    # If either is empty, we can't compare
+    if not initials1 or not initials2:
+        return True  # Be lenient when initials are missing
+
+    # Normalize to uppercase
+    i1 = initials1.upper().replace('.', '').replace(' ', '')
+    i2 = initials2.upper().replace('.', '').replace(' ', '')
+
+    # Exact match
+    if i1 == i2:
+        return True
+
+    # Check if one is a prefix of the other
+    # e.g., 'S' matches 'SC' (first initial matches)
+    if i1.startswith(i2) or i2.startswith(i1):
+        return True
+
+    # Check if they share at least the first initial
+    if i1[0] == i2[0]:
+        return True
+
+    return False
 
 
 def extract_citation_key_components(citation_key: str) -> Tuple[Optional[str], Optional[str]]:
@@ -253,23 +385,37 @@ def check_page_range_format(pages: str) -> Optional[str]:
 
 
 class BibTeXAPIChecker:
-    """Validates BibTeX entries against online APIs (Crossref + Semantic Scholar)."""
+    """Validates BibTeX entries against online APIs (Crossref + Semantic Scholar + Scholarly)."""
 
-    def __init__(self, verbose: bool = False, delay: float = 0.05):
+    def __init__(self, verbose: bool = False, delay: float = 0.05, use_scholarly: bool = True):
         """
         Initialize the API checker.
 
         Args:
             verbose: Enable verbose output
             delay: Delay between Crossref API queries (default: 0.05s for 20 req/sec)
+            use_scholarly: Enable Scholarly API (requires scholarly package)
         """
         self.verbose = verbose
         self.delay = delay
+        self.use_scholarly = use_scholarly and SCHOLARLY_AVAILABLE
         self.matches = []
         self.mismatches = []
         self.not_found = []
         self.field_mismatches = []  # Track field-level mismatches
         self.suggestions = []  # Track close matches for not-found entries
+
+        # Initialize Scholarly with proxy if available
+        if self.use_scholarly:
+            try:
+                self.log("Initializing Scholarly with free proxies...")
+                pg = ProxyGenerator()
+                pg.FreeProxies()
+                scholarly.use_proxy(pg)
+                self.log("Scholarly proxy initialized successfully")
+            except Exception as e:
+                self.log(f"Warning: Could not initialize Scholarly proxy: {e}")
+                self.use_scholarly = False
 
     def log(self, message: str):
         """Print message if verbose mode is enabled."""
@@ -381,8 +527,27 @@ class BibTeXAPIChecker:
             if check_unclosed_math_mode(title):
                 issues.append(f"Unclosed LaTeX math mode ($) in title")
 
-        # Compare DOI
-        if 'doi' in entry.fields:
+        # Determine if we should skip DOI checking
+        # Skip for: pre-1950 papers, phdthesis, book, misc entries
+        entry_year_int = None
+        if 'year' in entry.fields:
+            try:
+                entry_year_int = int(entry.fields['year'][:4])
+            except (ValueError, TypeError):
+                pass
+        elif 'date' in entry.fields:
+            try:
+                entry_year_int = int(entry.fields['date'][:4])
+            except (ValueError, TypeError):
+                pass
+
+        skip_doi_check = (
+            (entry_year_int is not None and entry_year_int < 1950) or
+            entry.type.lower() in ['phdthesis', 'book', 'misc']
+        )
+
+        # Compare DOI (but skip for certain entry types and old papers)
+        if 'doi' in entry.fields and not skip_doi_check:
             entry_doi = entry.fields['doi'].lower()
             api_doi = api_result.get('DOI', '').lower() if source == 'crossref' else api_result.get('doi', '').lower()
             if api_doi and entry_doi != api_doi:
@@ -418,10 +583,8 @@ class BibTeXAPIChecker:
             api_journal_list = api_result.get('container-title', [])
             if api_journal_list:
                 api_journal = api_journal_list[0] if isinstance(api_journal_list, list) else api_journal_list
-                # Normalize ampersands for comparison (API returns &amp;, BibTeX uses \&)
-                entry_journal_clean = normalize_ampersand(entry_journal.lower().strip())
-                api_journal_clean = normalize_ampersand(api_journal.lower().strip())
-                if entry_journal_clean != api_journal_clean:
+                # Use fuzzy matching to handle abbreviations, "The" prefix, and formatting differences
+                if not journals_match_fuzzy(entry_journal, api_journal):
                     issues.append(f"Journal mismatch: '{entry_journal}' vs '{api_journal}'")
 
         # Check page range format
@@ -478,7 +641,19 @@ class BibTeXAPIChecker:
                         'initials': initials,
                         'particles': particles
                     })
-            else:  # semantic scholar
+            elif source == 'semantic_scholar':
+                api_authors = api_result.get('authors', [])
+                api_author_count = len(api_authors)
+                for author in api_authors:
+                    name = author.get('name', '')
+                    lastname, initials, particles = extract_author_components(name)
+                    api_author_info.append({
+                        'original': name,
+                        'lastname': lastname,
+                        'initials': initials,
+                        'particles': particles
+                    })
+            elif source == 'scholarly':
                 api_authors = api_result.get('authors', [])
                 api_author_count = len(api_authors)
                 for author in api_authors:
@@ -511,7 +686,7 @@ class BibTeXAPIChecker:
                             f"First author mismatch: '{entry_first['original']}' vs '{api_first['original']}' - "
                             f"KEY MAY NEED TO CHANGE"
                         )
-                    elif entry_first['initials'] and api_first['initials'] and entry_first['initials'] != api_first['initials']:
+                    elif entry_first['initials'] and api_first['initials'] and not authors_initials_match(entry_first['initials'], api_first['initials']):
                         issues.append(
                             f"First author initials mismatch: '{entry_first['original']}' vs '{api_first['original']}'"
                         )
@@ -558,7 +733,7 @@ class BibTeXAPIChecker:
                             issues.append(
                                 f"Author at position {i+1} not in API: '{entry_auth['original']}' vs '{api_auth['original']}'"
                             )
-                    elif entry_auth['initials'] and api_auth['initials'] and entry_auth['initials'] != api_auth['initials']:
+                    elif entry_auth['initials'] and api_auth['initials'] and not authors_initials_match(entry_auth['initials'], api_auth['initials']):
                         issues.append(
                             f"Author initials mismatch at position {i+1}: "
                             f"'{entry_auth['original']}' vs '{api_auth['original']}'"
@@ -893,6 +1068,66 @@ class BibTeXAPIChecker:
 
         return None
 
+    def check_scholarly(self, key: str, entry: Entry, update: bool = False) -> Optional[Entry]:
+        """Check entry against Google Scholar via Scholarly API."""
+        if not self.use_scholarly:
+            return None
+
+        title = entry.fields.get('title', '').strip('{}').strip()
+        if not title:
+            return None
+
+        self.log(f"Searching Google Scholar for: {title}")
+
+        try:
+            # Search for the publication
+            search_query = scholarly.search_pubs(title)
+            result = next(search_query, None)
+
+            if result:
+                gs_title = result.get('bib', {}).get('title', '').lower()
+                entry_title = title.lower()
+
+                if self._titles_match(entry_title, gs_title):
+                    self.log(f"✓ Match found on Google Scholar")
+
+                    # Convert scholarly result to a format similar to other APIs
+                    bib = result.get('bib', {})
+                    api_result = {
+                        'title': bib.get('title', ''),
+                        'authors': [{'name': author} for author in bib.get('author', [])],
+                        'year': int(bib.get('pub_year', 0)) if bib.get('pub_year') else None,
+                        'venue': bib.get('venue', ''),
+                        'doi': result.get('pub_url', ''),  # Scholarly doesn't always provide DOI
+                    }
+
+                    self.matches.append({
+                        'entry_id': key,
+                        'source': 'scholarly',
+                        'title': title,
+                        'api_title': gs_title
+                    })
+
+                    # Compare fields
+                    self._compare_fields(key, entry, api_result, 'scholarly')
+
+                    # Note: We don't auto-update from Scholarly as it's less reliable than Crossref/SS
+                    return result
+                else:
+                    self.log(f"Title mismatch")
+                    self.mismatches.append({
+                        'entry_id': key,
+                        'title': title,
+                        'api_title': gs_title
+                    })
+            else:
+                self.log(f"Not found on Google Scholar")
+
+        except Exception as e:
+            self.log(f"Google Scholar error: {str(e)}")
+
+        return None
+
     def _crossref_to_entry(self, crossref_result: Dict, entry_key: str, entry_type: str) -> Entry:
         """Convert Crossref result to pybtex Entry format."""
         # Determine entry type - prefer original type when sensible
@@ -1029,15 +1264,18 @@ class BibTeXAPIChecker:
         return Entry(etype, fields=fields, persons=persons)
 
     def validate_all_entries(self, bib_data: BibliographyData):
-        """Validate all entries against APIs."""
+        """Validate all entries against APIs (comprehensive search using all 3 APIs)."""
         total = len(bib_data.entries)
-        print(f"\nValidating {total} entries against APIs...")
+        api_list = "Crossref, Semantic Scholar"
+        if self.use_scholarly:
+            api_list += ", and Google Scholar"
+        print(f"\nValidating {total} entries against APIs ({api_list})...")
         print("=" * 60)
 
         for idx, (key, entry) in enumerate(bib_data.entries.items(), 1):
             print(f"\n[{idx}/{total}] Checking: {key}")
 
-            # Try Crossref first
+            # Try Crossref first (most reliable and comprehensive)
             crossref_found = self.check_crossref(key, entry, update=False)
             time.sleep(self.delay)
 
@@ -1046,7 +1284,12 @@ class BibTeXAPIChecker:
                 self.check_semantic_scholar(key, entry, update=False)
                 time.sleep(1.0 if SEMANTIC_SCHOLAR_API_KEY else 5.0)
 
-            # Track if not found in either
+            # Final fallback to Google Scholar if neither Crossref nor Semantic Scholar found it
+            if self.use_scholarly and not any(m['entry_id'] == key for m in self.matches):
+                self.check_scholarly(key, entry, update=False)
+                time.sleep(2.0)  # Be respectful to Google Scholar
+
+            # Track if not found in any of the APIs
             if not any(m['entry_id'] == key for m in self.matches):
                 self.not_found.append(key)
 
@@ -1262,7 +1505,7 @@ class BibTeXAPIChecker:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='BibTeX API Diagnostics - Compare entries against Crossref and Semantic Scholar',
+        description='BibTeX API Diagnostics - Compare entries against Crossref, Semantic Scholar, and Google Scholar',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1274,6 +1517,9 @@ Examples:
 
   # Save validation report to file
   python biblatex_diagnostics.py input.bib -r report.txt
+
+  # Disable Google Scholar (use only Crossref and Semantic Scholar)
+  python biblatex_diagnostics.py input.bib --no-scholarly
         """
     )
 
@@ -1285,6 +1531,8 @@ Examples:
                        help='Delay between Crossref queries (default: 0.05s for 20 req/sec)')
     parser.add_argument('--update', action='store_true',
                        help='Update entries with API data (requires -o)')
+    parser.add_argument('--no-scholarly', action='store_true',
+                       help='Disable Google Scholar API (only use Crossref and Semantic Scholar)')
 
     args = parser.parse_args()
 
@@ -1292,7 +1540,7 @@ Examples:
         parser.error("--update requires -o/--output")
 
     # Initialize checker
-    checker = BibTeXAPIChecker(verbose=args.verbose, delay=args.delay)
+    checker = BibTeXAPIChecker(verbose=args.verbose, delay=args.delay, use_scholarly=not args.no_scholarly)
 
     try:
         # Load BibTeX file
