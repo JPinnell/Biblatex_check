@@ -152,7 +152,7 @@ KNOWN_FIELDS = {
 
 # Recommended fields for completeness (can use same alternative format as required fields)
 RECOMMENDED_FIELDS = {
-    'article': ['volume', ['number', 'issue'], 'pages', 'doi'],  # BibTeX uses 'number', BibLaTeX uses 'issue'
+    'article': ['volume', 'pages', 'doi'],
     'book': [['publisher'], ['location', 'address'], 'isbn'],    # BibTeX uses 'address', BibLaTeX uses 'location'
     'inproceedings': ['pages', ['publisher'], 'doi'],
 }
@@ -766,6 +766,8 @@ Examples:
     parser.add_argument('input_file', help='Input BibTeX file')
     parser.add_argument('-r', '--report-file', help='Save report to file')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--fix', action='store_true',
+                       help='Automatically fix issues and save to *_formatting_corrected.bib')
 
     # Diagnostic options
     parser.add_argument('--no-unicode', action='store_true', help='Skip unicode checking')
@@ -808,6 +810,15 @@ Examples:
             check_crossrefs_flag=not args.no_crossrefs,
             check_duplicates=not args.no_duplicates
         )
+
+        # Save corrected file if --fix option is used
+        if args.fix and cleaner.removed_duplicates:
+            # Generate output filename
+            import os
+            base_name = os.path.splitext(args.input_file)[0]
+            output_file = f"{base_name}_formatting_corrected.bib"
+            cleaner.save_bibtex(bib_data, output_file)
+            print(f"\n✓ Corrected file saved to: {output_file}")
 
         # Generate report
         report = cleaner.generate_report()
