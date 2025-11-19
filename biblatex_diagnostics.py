@@ -119,7 +119,7 @@ def normalize_journal_name(journal: str) -> str:
     Examples:
         '{IBM} Journal' -> 'ibm journal'
         'The Physics of Fluids' -> 'physics of fluids'
-        'Particle {\&} Systems' -> 'particle & systems'
+        'Particle {\\&} Systems' -> 'particle & systems'
     """
     # Convert to lowercase
     journal = journal.lower()
