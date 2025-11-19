@@ -86,6 +86,37 @@ def normalize_ampersand(text: str) -> str:
     return text
 
 
+def extract_citation_key_components(citation_key: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract author last name and year from citation key.
+
+    Common patterns:
+        - AuthorYEAR (e.g., Smith2020, deFornel2012)
+        - Author_YEAR (e.g., Smith_2020)
+        - AuthorYEARkeyword (e.g., Smith2020quantum)
+
+    Returns:
+        (author_lastname, year) tuple, or (None, None) if pattern not recognized
+    """
+    # Pattern 1: Look for 4-digit year (1900-2099)
+    year_match = re.search(r'(19|20)\d{2}', citation_key)
+    if not year_match:
+        return (None, None)
+
+    year = year_match.group(0)
+    year_pos = year_match.start()
+
+    # Extract author name before the year
+    author_part = citation_key[:year_pos].rstrip('_-')
+    if not author_part:
+        return (None, None)
+
+    # Normalize the author name (remove accents, lowercase)
+    author_normalized = normalize_latex_text(author_part).lower()
+
+    return (author_normalized, year)
+
+
 def extract_author_components(person_str: str) -> Tuple[str, str, List[str]]:
     """
     Extract last name, initials, and particles from author name.
@@ -106,6 +137,23 @@ def extract_author_components(person_str: str) -> Tuple[str, str, List[str]]:
         parts = person_str.split(',')
         last_part = parts[0].strip()
         first_part = parts[1].strip() if len(parts) > 1 else ''
+
+        # Handle particles in comma-separated format (e.g., "de Fornel, F.")
+        # Split last_part to check for leading particles
+        last_parts_words = last_part.split()
+        if len(last_parts_words) > 1:
+            # Check if any leading words are particles
+            particle_count = 0
+            for word in last_parts_words[:-1]:  # All words except the last
+                if word.lower() in NAME_PARTICLES:
+                    particles.append(word.lower())
+                    particle_count += 1
+                else:
+                    break  # Stop at first non-particle
+
+            # Update last_part to exclude particles
+            if particle_count > 0:
+                last_part = ' '.join(last_parts_words[particle_count:])
     else:
         # Space-separated format
         parts = person_str.split()
@@ -148,7 +196,15 @@ def extract_author_components(person_str: str) -> Tuple[str, str, List[str]]:
         for part in name_parts:
             part = part.strip()
             if part and part.lower() not in NAME_PARTICLES and part.lower().rstrip('.') not in NAME_SUFFIXES:
-                initials += part[0].upper()
+                # Check if this part is grouped initials (e.g., "NC", "ABC")
+                # Grouped initials are: all uppercase, 2-4 letters, no dots
+                part_no_dots = part.replace('.', '')
+                if len(part_no_dots) >= 2 and len(part_no_dots) <= 4 and part_no_dots.isupper():
+                    # This appears to be grouped initials - add each letter
+                    initials += part_no_dots
+                else:
+                    # Regular name part - add first letter only
+                    initials += part[0].upper()
 
     return (lastname, initials, particles)
 
@@ -304,6 +360,9 @@ class BibTeXAPIChecker:
         """Compare fields between local entry and API result (BibTeX/BibLaTeX agnostic)."""
         issues = []
 
+        # Extract citation key components (author and year)
+        key_author, key_year = extract_citation_key_components(key)
+
         # Check for unclosed LaTeX math mode in title
         if 'title' in entry.fields:
             title = entry.fields['title']
@@ -336,6 +395,10 @@ class BibTeXAPIChecker:
 
             if api_year and entry_year != api_year:
                 issues.append(f"Year mismatch: '{entry_year}' vs '{api_year}'")
+
+            # Check if citation key year matches entry year
+            if key_year and entry_year != key_year:
+                issues.append(f"Citation key year mismatch: key contains '{key_year}' but entry has year '{entry_year}'")
 
         # Compare journal/journaltitle (check both - BibTeX/BibLaTeX agnostic)
         entry_journal = entry.fields.get('journal') or entry.fields.get('journaltitle')
@@ -435,6 +498,20 @@ class BibTeXAPIChecker:
                         issues.append(
                             f"First author initials mismatch: '{entry_first['original']}' vs '{api_first['original']}'"
                         )
+
+                    # Check if citation key author matches first author
+                    if key_author:
+                        # The key author might not include particles, so check both with and without
+                        entry_first_lastname = entry_first['lastname']
+                        # Also try with particles prepended
+                        entry_first_with_particles = entry_first_lastname
+                        if entry_first['particles']:
+                            entry_first_with_particles = ''.join(entry_first['particles']) + entry_first_lastname
+
+                        if key_author != entry_first_lastname and key_author != entry_first_with_particles:
+                            issues.append(
+                                f"Citation key author mismatch: key contains '{key_author}' but first author is '{entry_first['original']}'"
+                            )
 
                 # Check for author order issues (compare all authors in sequence)
                 max_check = min(len(entry_author_info), len(api_author_info))
