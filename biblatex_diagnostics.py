@@ -841,7 +841,9 @@ class BibTeXAPIChecker:
                     })
 
             # Compare author count (show actual author lists)
-            if api_author_count and entry_author_count != api_author_count:
+            # Skip count comparison if entry has "and others" (indicates truncated author list)
+            has_others = any(a['lastname'] == 'others' for a in entry_author_info)
+            if api_author_count and entry_author_count != api_author_count and not has_others:
                 entry_names = ' and '.join([a['original'] for a in entry_author_info])
                 api_names = ' and '.join([a['original'] for a in api_author_info])
                 issues.append(f"Author count mismatch: '{entry_names}' vs '{api_names}'")
@@ -849,7 +851,8 @@ class BibTeXAPIChecker:
             # Compare author order and details
             if api_author_info and entry_author_info:
                 # Check first author match (critical for citation key)
-                if len(entry_author_info) > 0 and len(api_author_info) > 0:
+                # Skip if first author is "others" (should be rare, but possible)
+                if len(entry_author_info) > 0 and len(api_author_info) > 0 and entry_author_info[0]['lastname'] != 'others':
                     entry_first = entry_author_info[0]
                     api_first = api_author_info[0]
 
@@ -897,6 +900,10 @@ class BibTeXAPIChecker:
 
                     # Skip if we already reported first author mismatch
                     if i == 0 and first_author_mismatch:
+                        continue
+
+                    # Skip comparison if entry author is "others" (BibTeX/BibLaTeX "et al.")
+                    if entry_auth['lastname'] == 'others':
                         continue
 
                     # Check last name and initials
