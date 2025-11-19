@@ -56,7 +56,7 @@ ENTRY_TYPES = {
         'required': [
             'author',
             'title',
-            'school',
+            ['school', 'institution'],  # Both 'school' and 'institution' are acceptable
             ['year', 'date']
         ],
         'optional': ['address', 'month', 'url']
@@ -138,6 +138,9 @@ KNOWN_FIELDS = {
     'abstract', 'annotation', 'keywords', 'file', 'library',
     'addendum', 'pubstate', 'version',
 
+    # Metadata (reference managers like Zotero, Mendeley, etc.)
+    'owner', 'timestamp', 'date-added', 'date-modified', 'copyright',
+
     # Special
     'entryset', 'execute', 'gender', 'hyphenation', 'indextitle',
     'indexsorttitle', 'label', 'nameaddon', 'options', 'presort',
@@ -163,6 +166,7 @@ class BibTeXCleaner:
         self.verbose = verbose
         self.issues = []
         self.warnings = []
+        self.removed_duplicates = []  # Track removed duplicate fields
 
     def log(self, message: str):
         """Print message if verbose mode is enabled."""
@@ -223,8 +227,16 @@ class BibTeXCleaner:
 
         for field, value in entry.fields.items():
             value_str = str(value)
+
+            # Remove LaTeX accent commands to avoid false positives
+            # This prevents flagging things like {\"a} or {\'e} as smart quotes
+            cleaned_value = value_str
+            # Remove common LaTeX accent patterns: {\cmd{char}}, {\cmd char}, \cmd{char}, \cmd char
+            cleaned_value = re.sub(r'\{\\[`\'^"~=.uvHckr]\{?[a-zA-Z]\}?\}', '', cleaned_value)
+            cleaned_value = re.sub(r'\\[`\'^"~=.uvHckr]\{?[a-zA-Z]\}?', '', cleaned_value)
+
             for char, desc in problematic_chars.items():
-                if char in value_str:
+                if char in cleaned_value:
                     self.issues.append(
                         f"Entry {key}, field '{field}': Contains {desc} ('{char}')"
                     )
@@ -580,6 +592,37 @@ class BibTeXCleaner:
                             f"Entry {key}: Broken related to '{rel_key}' (entry does not exist)"
                         )
 
+    def remove_duplicate_fields(self, bib_data: BibliographyData) -> List[str]:
+        """
+        Remove duplicate alternative fields (journal/journaltitle, year/date).
+        Keeps the BibLaTeX-preferred version (journaltitle, date).
+
+        Returns:
+            List of messages about removed duplicates
+        """
+        removed_duplicates = []
+
+        for key, entry in bib_data.entries.items():
+            # Check for journal AND journaltitle - keep journaltitle
+            if 'journal' in entry.fields and 'journaltitle' in entry.fields:
+                journal_value = entry.fields['journal']
+                journaltitle_value = entry.fields['journaltitle']
+                del entry.fields['journal']
+                removed_duplicates.append(
+                    f"Entry {key}: Removed duplicate 'journal' field (kept 'journaltitle')"
+                )
+
+            # Check for year AND date - keep date
+            if 'year' in entry.fields and 'date' in entry.fields:
+                year_value = entry.fields['year']
+                date_value = entry.fields['date']
+                del entry.fields['year']
+                removed_duplicates.append(
+                    f"Entry {key}: Removed duplicate 'year' field (kept 'date')"
+                )
+
+        return removed_duplicates
+
     def find_duplicates(self, bib_data: BibliographyData, threshold: float = 0.8) -> List[Tuple[str, str, float]]:
         """Find potential duplicate entries."""
         duplicates = []
@@ -634,6 +677,13 @@ class BibTeXCleaner:
         print(f"\nValidating {total} entries (local checks only, no API calls)...")
         print("=" * 60)
 
+        # Remove duplicate fields (journal/journaltitle, year/date) automatically
+        self.removed_duplicates = self.remove_duplicate_fields(bib_data)
+        if self.removed_duplicates:
+            print(f"\nAutomatically removed {len(self.removed_duplicates)} duplicate field(s)")
+            for msg in self.removed_duplicates:
+                print(f"  ✓ {msg}")
+
         # Per-entry checks
         for idx, (key, entry) in enumerate(bib_data.entries.items(), 1):
             print(f"\n[{idx}/{total}] Checking: {key}")
@@ -674,6 +724,11 @@ class BibTeXCleaner:
         report.append("BIBTEX FORMATTING REPORT")
         report.append("=" * 60)
 
+        if self.removed_duplicates:
+            report.append(f"\nDuplicate Fields Removed: {len(self.removed_duplicates)}")
+            for msg in self.removed_duplicates:
+                report.append(f"  ✓ {msg}")
+
         if self.issues:
             report.append(f"\nIssues Found: {len(self.issues)}")
             for issue in self.issues:
@@ -684,7 +739,7 @@ class BibTeXCleaner:
             for warning in self.warnings:
                 report.append(f"  ⚠ {warning}")
 
-        if not self.issues and not self.warnings:
+        if not self.issues and not self.warnings and not self.removed_duplicates:
             report.append("\n✓ No issues found!")
 
         report.append("\n" + "=" * 60)
