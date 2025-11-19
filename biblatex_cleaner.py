@@ -306,14 +306,26 @@ class BibTeXCleaner:
             if role in entry.persons:
                 persons = entry.persons[role]
 
+                # Check for "and others" with too few authors (likely hallucination)
+                # Count real authors (excluding "others")
+                real_author_count = sum(1 for p in persons if str(p).lower() != 'others')
+                has_others = any(str(p).lower() == 'others' for p in persons)
+
+                if has_others and real_author_count < 5:
+                    self.warnings.append(
+                        f"Entry {key}: Found 'and others' with only {real_author_count} real {role}(s) - possible hallucination"
+                    )
+
                 for idx, person in enumerate(persons, 1):
                     person_str = str(person)
 
                     # Single-word names (potential parsing issue)
+                    # Exception: "others" is valid in BibTeX/BibLaTeX for "et al."
                     if ' ' not in person_str.strip() and ',' not in person_str.strip():
-                        self.warnings.append(
-                            f"Entry {key}, {role} #{idx} '{person_str}': Single-word name (check parsing)"
-                        )
+                        if person_str.lower() != 'others':
+                            self.warnings.append(
+                                f"Entry {key}, {role} #{idx} '{person_str}': Single-word name (check parsing)"
+                            )
 
                     # Numbers in names
                     if re.search(r'\d', person_str):
