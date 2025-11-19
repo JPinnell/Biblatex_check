@@ -86,6 +86,18 @@ def normalize_ampersand(text: str) -> str:
     return text
 
 
+def clean_api_field(text: str) -> str:
+    """
+    Clean up field values imported from APIs.
+    Replaces HTML entities like &amp; with LaTeX equivalents like \\&.
+    """
+    if not isinstance(text, str):
+        return text
+    # Replace &amp; with \&
+    text = text.replace('&amp;', '\\&')
+    return text
+
+
 def extract_citation_key_components(citation_key: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Extract author last name and year from citation key.
@@ -429,7 +441,8 @@ class BibTeXAPIChecker:
                 issues.append("Found 'et al.' in author list - recommend changing to 'and others'")
 
             # Check for "and others" with too few authors (likely hallucination)
-            if 'and others' in entry_author_str.lower() and entry_author_count < 5:
+            # Only flag if there are 5 or fewer authors
+            if 'and others' in entry_author_str.lower() and entry_author_count <= 5:
                 issues.append(f"Found 'and others' with only {entry_author_count} authors - possible hallucination")
 
             # Extract entry author components (last name, initials, particles)
@@ -881,7 +894,7 @@ class BibTeXAPIChecker:
 
         # Create fields
         title = ''.join(crossref_result.get('title', []))
-        fields = {'title': '{' + title + '}'}
+        fields = {'title': '{' + clean_api_field(title) + '}'}
 
         # Add year
         published = crossref_result.get('published', {}) or crossref_result.get('published-print', {})
@@ -895,29 +908,39 @@ class BibTeXAPIChecker:
         if container_title:
             container = container_title[0] if isinstance(container_title, list) else container_title
             if etype == 'article':
-                fields['journaltitle'] = container
+                fields['journaltitle'] = clean_api_field(container)
             elif etype in ['inproceedings', 'incollection']:
-                fields['booktitle'] = container
+                fields['booktitle'] = clean_api_field(container)
 
         # Add volume, number, pages
         if 'volume' in crossref_result:
-            fields['volume'] = str(crossref_result['volume'])
+            fields['volume'] = clean_api_field(str(crossref_result['volume']))
         if 'issue' in crossref_result:
-            fields['number'] = str(crossref_result['issue'])
+            fields['number'] = clean_api_field(str(crossref_result['issue']))
         if 'page' in crossref_result:
-            fields['pages'] = crossref_result['page']
+            # Format pages with double hyphens (--)
+            pages = crossref_result['page']
+            # Replace single dash with double hyphen
+            pages = pages.replace('–', '--')  # en-dash to double hyphen
+            pages = pages.replace('—', '--')  # em-dash to double hyphen
+            # Only replace single hyphen if it's not already a double hyphen
+            if '--' not in pages:
+                pages = pages.replace('-', '--')
+            fields['pages'] = clean_api_field(pages)
 
         # Add publisher and DOI
         if 'publisher' in crossref_result:
-            fields['publisher'] = crossref_result['publisher']
+            fields['publisher'] = clean_api_field(crossref_result['publisher'])
         if 'DOI' in crossref_result:
-            fields['doi'] = crossref_result['DOI']
+            fields['doi'] = clean_api_field(crossref_result['DOI'])
 
         # Add ISBN/ISSN
         if 'ISBN' in crossref_result and crossref_result['ISBN']:
-            fields['isbn'] = crossref_result['ISBN'][0] if isinstance(crossref_result['ISBN'], list) else crossref_result['ISBN']
+            isbn_value = crossref_result['ISBN'][0] if isinstance(crossref_result['ISBN'], list) else crossref_result['ISBN']
+            fields['isbn'] = clean_api_field(isbn_value)
         if 'ISSN' in crossref_result and crossref_result['ISSN']:
-            fields['issn'] = crossref_result['ISSN'][0] if isinstance(crossref_result['ISSN'], list) else crossref_result['ISSN']
+            issn_value = crossref_result['ISSN'][0] if isinstance(crossref_result['ISSN'], list) else crossref_result['ISSN']
+            fields['issn'] = clean_api_field(issn_value)
 
         # Handle authors
         persons = {}
@@ -949,23 +972,23 @@ class BibTeXAPIChecker:
             etype = entry_type or 'article'
 
         # Create fields
-        fields = {'title': '{' + ss_result.get('title', '') + '}'}
+        fields = {'title': '{' + clean_api_field(ss_result.get('title', '')) + '}'}
 
         # Add year and venue
         if 'year' in ss_result and ss_result['year']:
             fields['year'] = str(ss_result['year'])
         if 'venue' in ss_result and ss_result['venue']:
             if etype == 'article':
-                fields['journaltitle'] = ss_result['venue']
+                fields['journaltitle'] = clean_api_field(ss_result['venue'])
             elif etype == 'inproceedings':
-                fields['booktitle'] = ss_result['venue']
+                fields['booktitle'] = clean_api_field(ss_result['venue'])
 
         # Add DOI and arXiv
         if 'doi' in ss_result and ss_result['doi']:
-            fields['doi'] = ss_result['doi']
+            fields['doi'] = clean_api_field(ss_result['doi'])
         external_ids = ss_result.get('externalIds', {})
         if external_ids.get('ArXiv'):
-            fields['eprint'] = external_ids['ArXiv']
+            fields['eprint'] = clean_api_field(external_ids['ArXiv'])
             fields['eprinttype'] = 'arxiv'
 
         # Handle authors
