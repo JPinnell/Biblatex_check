@@ -441,9 +441,13 @@ class BibTeXAPIChecker:
                 issues.append("Found 'et al.' in author list - recommend changing to 'and others'")
 
             # Check for "and others" with too few authors (likely hallucination)
-            # Only flag if there are 5 or fewer authors
-            if 'and others' in entry_author_str.lower() and entry_author_count <= 5:
-                issues.append(f"Found 'and others' with only {entry_author_count} authors - possible hallucination")
+            # Note: "others" is counted as an author by pybtex, so we need to exclude it
+            # Flag if there are 5 or fewer REAL authors (not counting "others")
+            if 'and others' in entry_author_str.lower():
+                # Count real authors (excluding "others")
+                real_author_count = sum(1 for p in entry_authors if str(p).lower() != 'others')
+                if real_author_count <= 5:
+                    issues.append(f"Found 'and others' with only {real_author_count} real authors - possible hallucination")
 
             # Extract entry author components (last name, initials, particles)
             entry_author_info = []
@@ -607,6 +611,12 @@ class BibTeXAPIChecker:
 
                     if data.get('message'):
                         result = data['message']
+                        api_title = ''.join(result.get('title', [''])).lower()
+                        entry_title_lower = title.lower() if title else ''
+
+                        # Check if both DOI and title match before auto-updating
+                        title_matches = self._titles_match(entry_title_lower, api_title) if title else False
+
                         self.log(f"✓ Found by DOI on Crossref")
                         self.matches.append({
                             'entry_id': key,
@@ -616,7 +626,9 @@ class BibTeXAPIChecker:
                         })
                         # Compare fields
                         self._compare_fields(key, entry, result, 'crossref')
-                        if update:
+
+                        # Only auto-update if both DOI and title match
+                        if update and title_matches:
                             return self._crossref_to_entry(result, key, entry.type)
                         return result
                 except Exception as e:
@@ -657,7 +669,13 @@ class BibTeXAPIChecker:
                     })
                     # Compare fields even if not updating
                     self._compare_fields(key, entry, first_result, 'crossref')
-                    if update:
+
+                    # Only auto-update if entry also has a DOI that matches the API DOI
+                    api_doi = first_result.get('DOI', '').lower()
+                    entry_doi = doi.lower() if doi else ''
+                    doi_matches = (entry_doi and api_doi and entry_doi == api_doi)
+
+                    if update and doi_matches:
                         return self._crossref_to_entry(first_result, key, entry.type)
                     return first_result  # Return result for suggestion purposes
                 else:
@@ -852,7 +870,13 @@ class BibTeXAPIChecker:
                     })
                     # Compare fields even if not updating
                     self._compare_fields(key, entry, result, 'semantic_scholar')
-                    if update:
+
+                    # Only auto-update if entry also has a DOI that matches
+                    entry_doi = entry.fields.get('doi', '').strip().lower()
+                    api_doi = result.get('doi', '').lower() if result.get('doi') else ''
+                    doi_matches = (entry_doi and api_doi and entry_doi == api_doi)
+
+                    if update and doi_matches:
                         return self._semantic_scholar_to_entry(result, key, entry.type)
                 else:
                     self.log(f"Title mismatch")
@@ -1105,7 +1129,18 @@ class BibTeXAPIChecker:
         for sug in entry_suggestions:
             score = 0
 
-            # Check first author match (highest priority: +100 points)
+            # Calculate title similarity (Jaccard index)
+            sug_title = sug.get('suggestion', '').lower()
+            title_similarity = 0
+            if entry_title and sug_title:
+                # Calculate word overlap
+                entry_words = set(re.sub(r'[^\w\s]', '', entry_title).split())
+                sug_words = set(re.sub(r'[^\w\s]', '', sug_title).split())
+                if entry_words and sug_words:
+                    title_similarity = len(entry_words & sug_words) / len(entry_words | sug_words)
+
+            # Check first author match
+            author_matches = False
             sug_authors_str = sug.get('authors', '')
             if sug_authors_str and sug_authors_str != 'N/A':
                 # Get first author from suggestion
@@ -1114,39 +1149,59 @@ class BibTeXAPIChecker:
 
                 if entry_first_author_lastname and sug_first_lastname:
                     if entry_first_author_lastname == sug_first_lastname:
-                        score += 100  # Same first author
-                    elif entry_first_author_lastname in sug_first_lastname or sug_first_lastname in entry_first_author_lastname:
-                        score += 50  # Partial match
+                        author_matches = True
 
-            # Check title similarity (+50 points for good match)
-            sug_title = sug.get('suggestion', '').lower()
-            if entry_title and sug_title:
-                # Calculate word overlap
-                entry_words = set(re.sub(r'[^\w\s]', '', entry_title).split())
-                sug_words = set(re.sub(r'[^\w\s]', '', sug_title).split())
-                if entry_words and sug_words:
-                    overlap = len(entry_words & sug_words) / len(entry_words | sug_words)
-                    score += int(overlap * 50)
-
-            # Check year match (+30 points)
+            # Check year match
+            year_matches = False
             sug_year = sug.get('year', 'N/A')
             if entry_year and sug_year != 'N/A' and str(entry_year) == str(sug_year):
+                year_matches = True
+
+            # Priority ranking:
+            # 1. High title match (>0.8): 200 points
+            # 2. Very good title match (>0.7): 180 points
+            # 3. Good title match (>0.6) + same author: 150 points
+            # 4. Good title match (>0.6) + same year: 120 points
+            # 5. Moderate title match (>0.5): 100 points
+            # 6. Lower title matches get proportional scores
+
+            if title_similarity > 0.8:
+                score = 200
+            elif title_similarity > 0.7:
+                score = 180
+            elif title_similarity > 0.6 and author_matches:
+                score = 150
+            elif title_similarity > 0.6 and year_matches:
+                score = 120
+            elif title_similarity > 0.6:
+                score = 110
+            elif title_similarity > 0.5:
+                score = 100
+            else:
+                score = int(title_similarity * 100)
+
+            # Bonus for matching author (if not already counted above)
+            if author_matches and title_similarity <= 0.6:
                 score += 30
+
+            # Bonus for matching year (if not already counted above)
+            if year_matches and title_similarity <= 0.6:
+                score += 20
 
             # Bonus points for certain search strategies
             strategy = sug.get('strategy', '')
             if strategy == 'author_year':
-                score += 10
-            elif strategy == 'author_keywords':
                 score += 5
+            elif strategy == 'author_keywords':
+                score += 3
 
-            scored_suggestions.append((score, sug))
+            scored_suggestions.append((score, sug, title_similarity))
 
-        # Sort by score (highest first)
-        scored_suggestions.sort(key=lambda x: x[0], reverse=True)
+        # Sort by score (highest first), then by title similarity as tiebreaker
+        scored_suggestions.sort(key=lambda x: (x[0], x[2]), reverse=True)
 
-        # Return just the suggestions (without scores)
-        return [sug for score, sug in scored_suggestions]
+        # Return just the suggestions (without scores and similarity)
+        return [sug for score, sug, similarity in scored_suggestions]
 
     def generate_report(self, bib_data: Optional[BibliographyData] = None) -> str:
         """Generate validation report."""
