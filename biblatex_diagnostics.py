@@ -38,8 +38,29 @@ NAME_SUFFIXES = {'jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'v'}
 
 
 def remove_accents(text: str) -> str:
-    """Remove accents from Unicode string."""
-    # Normalize to NFD (decomposed form)
+    """
+    Remove accents from Unicode string and normalize special characters.
+
+    Handles both combining accents (NFD decomposition) and special base characters
+    like ø, æ, œ that don't decompose in NFD.
+    """
+    # First, replace special Unicode characters that don't decompose in NFD
+    # These are distinct base characters, not letter + combining mark
+    special_unicode_chars = {
+        'ø': 'o', 'Ø': 'O',
+        'æ': 'ae', 'Æ': 'AE',
+        'œ': 'oe', 'Œ': 'OE',
+        'å': 'a', 'Å': 'A',
+        'ß': 'ss',
+        'ð': 'd', 'Ð': 'D',
+        'þ': 'th', 'Þ': 'TH',
+        'ł': 'l', 'Ł': 'L',
+    }
+
+    for char, replacement in special_unicode_chars.items():
+        text = text.replace(char, replacement)
+
+    # Normalize to NFD (decomposed form) to handle combining accents
     nfd = unicodedata.normalize('NFD', text)
     # Filter out combining characters (accents)
     return ''.join(char for char in nfd if unicodedata.category(char) != 'Mn')
@@ -48,12 +69,60 @@ def remove_accents(text: str) -> str:
 def normalize_latex_text(text: str) -> str:
     """
     Normalize LaTeX text by converting LaTeX accents to their Unicode equivalents,
-    then removing accents for comparison.
+    then removing accents and punctuation for comparison.
 
     Examples:
         g{\\'e}r{\\^o}me -> gérôme -> gerome
         \\"{o} -> ö -> o
+        Rosales-Guzmán -> RosalesGuzman
+        Berg-Sørensen -> BergSorensen
+        Berg-S{\\o}rensen -> BergSorensen
     """
+    # Special LaTeX characters (must be handled before accent commands)
+    # These are complete character replacements, not accents
+    special_chars = {
+        r'{\o}': 'o',
+        r'\o{}': 'o',
+        r'\o ': 'o',
+        r'\o': 'o',
+        r'{\O}': 'O',
+        r'\O{}': 'O',
+        r'\O ': 'O',
+        r'\O': 'O',
+        r'{\aa}': 'aa',
+        r'\aa{}': 'aa',
+        r'\aa ': 'aa',
+        r'\aa': 'aa',
+        r'{\AA}': 'AA',
+        r'\AA{}': 'AA',
+        r'\AA ': 'AA',
+        r'\AA': 'AA',
+        r'{\ae}': 'ae',
+        r'\ae{}': 'ae',
+        r'\ae ': 'ae',
+        r'\ae': 'ae',
+        r'{\AE}': 'AE',
+        r'\AE{}': 'AE',
+        r'\AE ': 'AE',
+        r'\AE': 'AE',
+        r'{\oe}': 'oe',
+        r'\oe{}': 'oe',
+        r'\oe ': 'oe',
+        r'\oe': 'oe',
+        r'{\OE}': 'OE',
+        r'\OE{}': 'OE',
+        r'\OE ': 'OE',
+        r'\OE': 'OE',
+        r'{\ss}': 'ss',
+        r'\ss{}': 'ss',
+        r'\ss ': 'ss',
+        r'\ss': 'ss',
+    }
+
+    # Replace special characters (order matters - longer patterns first)
+    for latex_cmd, replacement in special_chars.items():
+        text = text.replace(latex_cmd, replacement)
+
     # Common LaTeX accent commands
     latex_accents = {
         r"\'": '',  # acute
@@ -71,7 +140,7 @@ def normalize_latex_text(text: str) -> str:
         r'\r': '',  # ring above
     }
 
-    # First, handle braced accent commands like {\'e}
+    # Handle braced accent commands like {\'e}
     for cmd in latex_accents.keys():
         # Match patterns like {\cmd{letter}} or {\\cmd letter}
         text = re.sub(r'\{' + re.escape(cmd) + r'\{([a-zA-Z])\}\}', r'\1', text)
@@ -82,8 +151,12 @@ def normalize_latex_text(text: str) -> str:
     # Remove any remaining braces
     text = text.replace('{', '').replace('}', '')
 
-    # Remove accents from any Unicode characters
+    # Remove accents from any Unicode characters (handles Unicode like ø, ö, ä, etc.)
     text = remove_accents(text)
+
+    # Remove hyphens, apostrophes, and other punctuation that shouldn't affect name matching
+    # This helps match 'Rosales-Guzmán' with 'RosalesGuzman' in citation keys
+    text = re.sub(r'[-\'`]', '', text)
 
     return text
 
@@ -113,6 +186,7 @@ def normalize_journal_name(journal: str) -> str:
     - Converting to lowercase
     - Removing LaTeX braces
     - Normalizing ampersands
+    - Removing periods (for abbreviation matching)
     - Removing leading 'The'
     - Stripping whitespace
 
@@ -120,6 +194,8 @@ def normalize_journal_name(journal: str) -> str:
         '{IBM} Journal' -> 'ibm journal'
         'The Physics of Fluids' -> 'physics of fluids'
         'Particle {\\&} Systems' -> 'particle & systems'
+        'Phys. Chem. Chem. Phys.' -> 'phys chem chem phys'
+        'J. of Electrical Engineering' -> 'j of electrical engineering'
     """
     # Convert to lowercase
     journal = journal.lower()
@@ -129,6 +205,9 @@ def normalize_journal_name(journal: str) -> str:
 
     # Normalize ampersands
     journal = normalize_ampersand(journal)
+
+    # Remove periods (helps with abbreviation matching)
+    journal = journal.replace('.', '')
 
     # Remove leading 'The ' or 'the '
     journal = journal.strip()
@@ -141,17 +220,17 @@ def normalize_journal_name(journal: str) -> str:
     return journal
 
 
-def journals_match_fuzzy(journal1: str, journal2: str, threshold: float = 0.75) -> bool:
+def journals_match_fuzzy(journal1: str, journal2: str, threshold: float = 0.6) -> bool:
     """
     Compare two journal names with fuzzy matching to handle:
-    - Abbreviations (e.g., 'Lab on a Chip' vs 'Lab Chip')
+    - Abbreviations (e.g., 'Lab on a Chip' vs 'Lab Chip', 'Phys. Chem.' vs 'Physical Chemistry')
     - Articles ('The Physics of Fluids' vs 'Physics of Fluids')
-    - Formatting differences (braces, ampersands)
+    - Formatting differences (braces, ampersands, periods)
 
     Args:
         journal1: First journal name
         journal2: Second journal name
-        threshold: Similarity threshold (0.0 to 1.0)
+        threshold: Similarity threshold (0.0 to 1.0), default lowered to 0.6 for abbreviations
 
     Returns:
         True if journals match within threshold
@@ -171,6 +250,12 @@ def journals_match_fuzzy(journal1: str, journal2: str, threshold: float = 0.75) 
     if not words1 or not words2:
         return False
 
+    # Filter out common words that don't help distinguish journals
+    stop_words = {'of', 'the', 'and', 'for', 'in', 'on'}
+    words1_filtered = words1 - stop_words
+    words2_filtered = words2 - stop_words
+
+    # Check for exact word matches
     intersection = len(words1.intersection(words2))
     union = len(words1.union(words2))
     similarity = intersection / union if union > 0 else 0
@@ -179,15 +264,42 @@ def journals_match_fuzzy(journal1: str, journal2: str, threshold: float = 0.75) 
     # e.g., "Lab Chip" is contained in "Lab on a Chip"
     if norm1 in norm2 or norm2 in norm1:
         # If one is substring of the other, be more lenient
-        return similarity > 0.5
+        return similarity > 0.4
 
     # For abbreviations where all words of the shorter match the longer
     # e.g., "Lab Chip" vs "Lab on a Chip" - all words of "Lab Chip" are in "Lab on a Chip"
     smaller_set = words1 if len(words1) < len(words2) else words2
     larger_set = words2 if len(words1) < len(words2) else words1
 
-    # If all words from the smaller set are in the larger set, and there's significant overlap
+    # If all words from the smaller set are in the larger set, accept it
     if smaller_set.issubset(larger_set):
+        return True
+
+    # Check for abbreviation matches: if words start with the same letters
+    # e.g., 'phys' matches 'physical', 'chem' matches 'chemistry', 'j' matches 'journal'
+    abbrev_matches = 0
+    for w1 in words1_filtered:
+        for w2 in words2_filtered:
+            # Check if one is a prefix of the other
+            # Allow single-letter abbreviations (e.g., 'j' for 'journal')
+            if w1.startswith(w2) or w2.startswith(w1):
+                # For very short words (1-2 chars), only match if it's the first letter
+                min_len = min(len(w1), len(w2))
+                max_len = max(len(w1), len(w2))
+                if min_len <= 2 and max_len > 2:
+                    # Short abbreviation - check if shorter word matches start of longer word
+                    shorter = w1 if len(w1) < len(w2) else w2
+                    longer = w2 if len(w1) < len(w2) else w1
+                    if longer.startswith(shorter):
+                        abbrev_matches += 1
+                        break
+                else:
+                    # Regular prefix match
+                    abbrev_matches += 1
+                    break
+
+    # If we have good abbreviation matches, be more lenient
+    if abbrev_matches >= min(len(words1_filtered), len(words2_filtered)) * 0.5:
         return True
 
     return similarity >= threshold
@@ -228,6 +340,68 @@ def authors_initials_match(initials1: str, initials2: str) -> bool:
         return True
 
     return False
+
+
+def normalize_with_transliterations(text: str) -> List[str]:
+    """
+    Generate multiple normalized versions of text to handle common transliterations.
+
+    German/Scandinavian transliterations:
+        ö -> o or oe
+        ä -> a or ae
+        ü -> u or ue
+        ø -> o or oe
+        å -> a or aa
+
+    Returns:
+        List of normalized variants (always includes the base normalized version)
+        For names in "Last, First" format, returns both full name and last name only variants
+
+    Examples:
+        'Engström' -> ['engstrom', 'engstroem']
+        'Müller' -> ['muller', 'mueller']
+        'Engström, David' -> ['engstrom, david', 'engstroem, david', 'engstrom', 'engstroem']
+    """
+    # Base normalization
+    base = normalize_latex_text(text).lower()
+    variants = [base]
+
+    # If this is a "Last, First" format, also extract just the last name
+    if ',' in text:
+        lastname_only = text.split(',')[0].strip()
+        lastname_base = normalize_latex_text(lastname_only).lower()
+        if lastname_base not in variants:
+            variants.append(lastname_base)
+
+    # Generate transliterated variants by replacing normalized vowels with their transliterations
+    # We check the original text for these characters before normalization
+    original_lower = text.lower()
+
+    # Check if original had special characters that might have transliterations
+    has_special = any(c in original_lower for c in ['ö', 'ä', 'ü', 'ø', 'å', 'œ'])
+
+    if has_special:
+        # Create variant with German/Scandinavian transliterations
+        # Start with the original and apply transliterations before other normalization
+        variant = text
+        variant = variant.replace('ö', 'oe').replace('Ö', 'Oe')
+        variant = variant.replace('ä', 'ae').replace('Ä', 'Ae')
+        variant = variant.replace('ü', 'ue').replace('Ü', 'Ue')
+        variant = variant.replace('ø', 'oe').replace('Ø', 'Oe')
+        variant = variant.replace('å', 'aa').replace('Å', 'Aa')
+        variant = variant.replace('œ', 'oe').replace('Œ', 'Oe')
+        # Now normalize the variant (remove LaTeX, hyphens, etc.)
+        variant = re.sub(r'[-\'`]', '', variant).lower()
+        if variant != base and variant not in variants:
+            variants.append(variant)
+
+        # Also add just the last name variant if in "Last, First" format
+        if ',' in variant:
+            lastname_variant = variant.split(',')[0].strip()
+            if lastname_variant not in variants:
+                variants.append(lastname_variant)
+
+    return variants
 
 
 def extract_citation_key_components(citation_key: str) -> Tuple[Optional[str], Optional[str]]:
@@ -700,7 +874,17 @@ class BibTeXAPIChecker:
                         if entry_first['particles']:
                             entry_first_with_particles = ''.join(entry_first['particles']) + entry_first_lastname
 
-                        if key_author != entry_first_lastname and key_author != entry_first_with_particles:
+                        # Generate transliteration variants to handle names like 'Engström' vs 'Engstroem'
+                        entry_variants = normalize_with_transliterations(entry_first['original'])
+
+                        # Check if key author matches any variant
+                        matches_any_variant = (
+                            key_author == entry_first_lastname or
+                            key_author == entry_first_with_particles or
+                            key_author in entry_variants
+                        )
+
+                        if not matches_any_variant:
                             issues.append(
                                 f"Citation key author mismatch: key contains '{key_author}' but first author is '{entry_first['original']}'"
                             )
