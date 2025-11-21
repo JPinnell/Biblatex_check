@@ -35,6 +35,7 @@ SEMANTIC_SCHOLAR_API_KEY = os.environ.get('SEMANTIC_SCHOLAR_API_KEY', None)
 # Name particles that should be ignored when comparing/sorting author names
 NAME_PARTICLES = {'von', 'van', 'de', 'del', 'della', 'di', 'du', 'le', 'la', 'da', 'dos', 'das', 'ten', 'ter', 'den', 'der'}
 NAME_SUFFIXES = {'jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'v'}
+SKIPPED_ENTRY_TYPES = {'phdthesis', 'misc', 'online'}
 
 
 def remove_accents(text: str) -> str:
@@ -119,9 +120,21 @@ def normalize_latex_text(text: str) -> str:
         r'\ss': 'ss',
     }
 
+    # Dotless base characters that are often combined with accent commands
+    base_letters = {
+        r'\i': 'i',
+        r'\j': 'j',
+        r'\l': 'l',
+        r'\L': 'L',
+    }
+
     # Replace special characters (order matters - longer patterns first)
     for latex_cmd, replacement in special_chars.items():
         text = text.replace(latex_cmd, replacement)
+
+    # Replace base letters so accent removal works on LaTeX sequences like {\'{\i}}
+    for base_cmd, replacement in base_letters.items():
+        text = text.replace(base_cmd, replacement)
 
     # Common LaTeX accent commands
     latex_accents = {
@@ -870,21 +883,29 @@ class BibTeXAPIChecker:
 
                     # Check if citation key author matches first author
                     if key_author:
+                        # Normalize key author to strip accents/hyphens in case raw key kept them
+                        normalized_key_author = normalize_latex_text(key_author).lower()
+
                         # The key author might not include particles, so check both with and without
-                        entry_first_lastname = entry_first['lastname']
+                        entry_first_lastname = normalize_latex_text(entry_first['lastname']).lower()
                         # Also try with particles prepended
                         entry_first_with_particles = entry_first_lastname
                         if entry_first['particles']:
-                            entry_first_with_particles = ''.join(entry_first['particles']) + entry_first_lastname
+                            particles_normalized = ''.join(normalize_latex_text(p).lower() for p in entry_first['particles'])
+                            entry_first_with_particles = particles_normalized + entry_first_lastname
 
                         # Generate transliteration variants to handle names like 'Engström' vs 'Engstroem'
                         entry_variants = normalize_with_transliterations(entry_first['original'])
+                        if entry_first_lastname not in entry_variants:
+                            entry_variants.append(entry_first_lastname)
+                        if entry_first_with_particles not in entry_variants:
+                            entry_variants.append(entry_first_with_particles)
 
                         # Check if key author matches any variant
                         matches_any_variant = (
-                            key_author == entry_first_lastname or
-                            key_author == entry_first_with_particles or
-                            key_author in entry_variants
+                            normalized_key_author == entry_first_lastname or
+                            normalized_key_author == entry_first_with_particles or
+                            normalized_key_author in entry_variants
                         )
 
                         if not matches_any_variant:
@@ -1466,6 +1487,10 @@ class BibTeXAPIChecker:
         for idx, (key, entry) in enumerate(bib_data.entries.items(), 1):
             print(f"\n[{idx}/{total}] Checking: {key}")
 
+            if (entry.type or '').lower() in SKIPPED_ENTRY_TYPES:
+                print(f"  - Skipping entry type '{entry.type}' for API checks")
+                continue
+
             # Try Crossref first (most reliable and comprehensive)
             crossref_found = self.check_crossref(key, entry, update=False)
             time.sleep(self.delay)
@@ -1496,6 +1521,10 @@ class BibTeXAPIChecker:
 
         for idx, (key, entry) in enumerate(list(bib_data.entries.items()), 1):
             print(f"\n[{idx}/{total}] Processing: {key}")
+
+            if (entry.type or '').lower() in SKIPPED_ENTRY_TYPES:
+                print(f"  - Skipping entry type '{entry.type}' for API updates")
+                continue
 
             # Try Crossref first
             updated_entry = self.check_crossref(key, entry, update=True)
