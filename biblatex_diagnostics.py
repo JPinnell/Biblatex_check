@@ -669,45 +669,13 @@ class BibTeXAPIChecker:
             raise
 
     def save_bibtex(self, bib_data: BibliographyData, filepath: str):
-        """Save BibTeX database to file with proper formatting."""
+        """
+        Save BibTeX database to file using pybtex's Writer.
+        This ensures proper formatting and preserves existing fields exactly as they were.
+        """
+        writer = Writer()
         with open(filepath, 'w', encoding='utf-8') as f:
-            for key, entry in bib_data.entries.items():
-                # Write entry header
-                f.write(f"@{entry.type}{{{key},\n")
-
-                # Collect all items (persons + fields) to determine last item
-                items = []
-
-                # Add persons (author, editor, etc.)
-                for role, persons in entry.persons.items():
-                    if persons:
-                        names = []
-                        for person in persons:
-                            names.append(str(person))
-                        author_str = ' and '.join(names)
-                        items.append(('person', role, author_str))
-
-                # Add fields
-                for field, value in entry.fields.items():
-                    items.append(('field', field, value))
-
-                # Write all items with commas except the last
-                for idx, (item_type, name, value) in enumerate(items):
-                    is_last = (idx == len(items) - 1)
-                    comma = '' if is_last else ','
-
-                    # Format value with braces
-                    # Ensure the entire value is wrapped in braces
-                    # Check both start AND end to avoid issues with nested braces
-                    # e.g., "{AIP} Publishing" needs to become "{{AIP} Publishing}"
-                    if not (value.startswith('{') and value.endswith('}')):
-                        value = '{' + value + '}'
-
-                    f.write(f"    {name} = {value}{comma}\n")
-
-                # Close entry
-                f.write("}\n\n")
-
+            writer.write_stream(bib_data, f)
         self.log(f"Saved corrected BibTeX to: {filepath}")
 
     def _titles_match(self, title1: str, title2: str) -> bool:
