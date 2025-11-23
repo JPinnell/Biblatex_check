@@ -1533,16 +1533,16 @@ class BibTeXAPIChecker:
 
     def add_missing_fields(self, bib_data: BibliographyData,
                            target_fields: Optional[List[str]] = None,
-                           scholarly_delay: float = 3.0) -> BibliographyData:
+                           scholarly_delay: float = 10.0) -> BibliographyData:
         """
         Add missing fields to entries by querying APIs.
-        Only updates entries that have both title and DOI.
+        Only processes entries that are missing the specified fields and have a DOI.
         Adds only the missing fields without replacing the entire entry.
 
         Args:
             bib_data: The bibliography database
             target_fields: List of field names to add if missing (default: ['pages', 'number', 'volume'])
-            scholarly_delay: Delay in seconds when using Scholarly API (default: 3.0s)
+            scholarly_delay: Delay in seconds when using Scholarly API (default: 10.0s)
 
         Returns:
             Updated BibliographyData object
@@ -1560,31 +1560,18 @@ class BibTeXAPIChecker:
             else:
                 normalized_targets.add(field)
 
-        total = len(bib_data.entries)
-        print(f"\nAdding missing fields ({', '.join(target_fields)}) to entries...")
-        print("=" * 60)
+        # STEP 1: Filter entries that have missing target fields AND have a DOI
+        print(f"\nScanning for entries with missing fields ({', '.join(target_fields)})...")
+        entries_to_process = []
 
-        updated_count = 0
-        crossref_count = 0
-        scholarly_count = 0
-        skipped_no_doi_title = 0
-        skipped_no_missing_fields = 0
-
-        for idx, (key, entry) in enumerate(list(bib_data.entries.items()), 1):
-            print(f"\n[{idx}/{total}] Checking: {key}")
-
+        for key, entry in bib_data.entries.items():
             # Skip certain entry types
             if (entry.type or '').lower() in SKIPPED_ENTRY_TYPES:
-                print(f"  - Skipping entry type '{entry.type}'")
                 continue
 
-            # Check if entry has both title and DOI (required for matching)
-            title = entry.fields.get('title', '').strip('{}').strip()
+            # Must have DOI for safe matching
             doi = entry.fields.get('doi', '').strip()
-
-            if not title or not doi:
-                print(f"  - Skipping: missing title or DOI (required for safe matching)")
-                skipped_no_doi_title += 1
+            if not doi:
                 continue
 
             # Check which target fields are missing
@@ -1593,13 +1580,34 @@ class BibTeXAPIChecker:
                 if field not in entry.fields:
                     missing_fields.append(field)
 
-            # Skip if no target fields are missing
-            if not missing_fields:
-                print(f"  - Already has all target fields")
-                skipped_no_missing_fields += 1
-                continue
+            # Only process if at least one target field is missing
+            if missing_fields:
+                entries_to_process.append((key, entry, missing_fields))
 
-            print(f"  - Missing fields: {', '.join(missing_fields)}")
+        total = len(bib_data.entries)
+        to_process = len(entries_to_process)
+        print(f"Found {to_process} entries (out of {total}) with missing fields and DOI")
+
+        if to_process == 0:
+            print("\nNo entries need processing. All entries either:")
+            print("  - Already have the target fields, OR")
+            print("  - Don't have a DOI, OR")
+            print("  - Are skipped entry types (phdthesis, misc, online)")
+            return bib_data
+
+        print("=" * 60)
+
+        updated_count = 0
+        crossref_count = 0
+        scholarly_count = 0
+
+        # STEP 2: Process only the filtered entries
+        for idx, (key, entry, missing_fields) in enumerate(entries_to_process, 1):
+            print(f"\n[{idx}/{to_process}] Processing: {key}")
+            print(f"  - Missing: {', '.join(missing_fields)}")
+
+            title = entry.fields.get('title', '').strip('{}').strip()
+            doi = entry.fields.get('doi', '').strip()
 
             # Track which fields were added
             fields_added = []
@@ -1617,13 +1625,38 @@ class BibTeXAPIChecker:
 
                 if data.get('message'):
                     result = data['message']
+
+                    # DOI lookup is authoritative - if we got a result, trust it
+                    # Just do a basic sanity check on title (relaxed matching)
                     api_title = ''.join(result.get('title', [''])).lower()
-                    entry_title_lower = title.lower()
+                    entry_title_lower = title.lower() if title else ''
 
-                    # Verify title matches before adding fields
-                    if self._titles_match(entry_title_lower, api_title):
-                        self.log("✓ Title matches, checking for missing fields in Crossref data")
+                    # Very relaxed title check - just check if some words overlap
+                    # or skip if entry has no title (some entries may not have title in local file)
+                    title_ok = False
+                    if not title:
+                        # No local title, trust the DOI
+                        title_ok = True
+                        self.log("✓ No local title, trusting DOI match")
+                    elif api_title and entry_title_lower:
+                        # Remove punctuation and compare word overlap
+                        entry_words = set(re.sub(r'[^\w\s]', '', entry_title_lower).split())
+                        api_words = set(re.sub(r'[^\w\s]', '', api_title).split())
+                        if entry_words and api_words:
+                            overlap = len(entry_words & api_words) / len(entry_words | api_words)
+                            if overlap > 0.7:  # 70% word overlap for minor differences (caps, punctuation, spacing)
+                                title_ok = True
+                                self.log(f"✓ Title overlap {overlap:.2%}, accepting DOI match")
+                            else:
+                                # Lower overlap indicates potential mismatch - warn but trust DOI
+                                self.log(f"⚠ Low title overlap {overlap:.2%} but DOI matches - proceeding cautiously")
+                                print(f"  ⚠ Warning: Title mismatch (local: '{title[:50]}...', API: '{api_title[:50]}...') but DOI matches")
+                                title_ok = True
+                    else:
+                        # Can't compare, trust DOI
+                        title_ok = True
 
+                    if title_ok:
                         # Add missing fields from Crossref result
                         if 'pages' in fields_still_missing and 'page' in result:
                             pages = result['page']
@@ -1654,8 +1687,6 @@ class BibTeXAPIChecker:
                             print(f"  ✓ Added from Crossref: {', '.join(fields_added)}")
                             crossref_count += 1
                             updated_count += 1
-                    else:
-                        print(f"  ✗ Title mismatch with Crossref, skipping")
 
             except Exception as e:
                 self.log(f"Crossref error: {str(e)}")
@@ -1664,7 +1695,7 @@ class BibTeXAPIChecker:
             time.sleep(self.delay)
 
             # If any fields are still missing, try Scholarly API as fallback
-            if fields_still_missing and self.use_scholarly:
+            if fields_still_missing and self.use_scholarly and title:
                 print(f"  - Trying Scholarly for remaining fields: {', '.join(fields_still_missing)}")
 
                 try:
@@ -1676,15 +1707,20 @@ class BibTeXAPIChecker:
                         gs_title = result.get('bib', {}).get('title', '').lower()
                         entry_title = title.lower()
 
-                        if self._titles_match(entry_title, gs_title):
-                            self.log("✓ Title matches in Scholarly, checking for fields")
+                        # Relaxed title matching for Scholarly too
+                        entry_words = set(re.sub(r'[^\w\s]', '', entry_title).split())
+                        gs_words = set(re.sub(r'[^\w\s]', '', gs_title).split())
+                        overlap = 0
+                        if entry_words and gs_words:
+                            overlap = len(entry_words & gs_words) / len(entry_words | gs_words)
+
+                        if overlap > 0.5:  # 50% overlap for Scholarly (no DOI verification)
+                            self.log(f"✓ Title overlap {overlap:.2%} with Scholarly")
                             bib = result.get('bib', {})
                             scholarly_fields_added = []
 
                             # Try to extract missing fields from Scholarly
-                            # Note: Scholarly doesn't always have complete data
                             if 'pages' in fields_still_missing:
-                                # Scholarly might have 'pages' in bib dict
                                 pages_data = bib.get('pages', '')
                                 if pages_data:
                                     # Ensure double hyphen format
@@ -1721,7 +1757,7 @@ class BibTeXAPIChecker:
                                     updated_count += 1
                                 fields_added.extend(scholarly_fields_added)
                         else:
-                            print(f"  ✗ Title mismatch with Scholarly")
+                            print(f"  ✗ Title overlap too low ({overlap:.2%}) with Scholarly")
 
                 except Exception as e:
                     self.log(f"Scholarly error: {str(e)}")
@@ -1735,11 +1771,9 @@ class BibTeXAPIChecker:
                 print(f"  - Still missing: {', '.join(fields_still_missing)}")
 
         print(f"\n{'=' * 60}")
-        print(f"Updated {updated_count}/{total} entries")
+        print(f"Updated {updated_count}/{to_process} entries that needed processing")
         print(f"  - Fields added via Crossref: {crossref_count} entries")
         print(f"  - Fields added via Scholarly: {scholarly_count} entries")
-        print(f"  - Skipped (no DOI/title): {skipped_no_doi_title}")
-        print(f"  - Skipped (no missing fields): {skipped_no_missing_fields}")
 
         return bib_data
 
@@ -1997,8 +2031,8 @@ Examples:
     parser.add_argument('--fields', nargs='+', default=['pages', 'number', 'volume'],
                        help='Specify which fields to add when using --add-missing-fields '
                             '(default: pages number volume)')
-    parser.add_argument('--scholarly-delay', type=float, default=3.0,
-                       help='Delay between Scholarly queries when adding missing fields (default: 3.0s)')
+    parser.add_argument('--scholarly-delay', type=float, default=10.0,
+                       help='Delay between Scholarly queries when adding missing fields (default: 10.0s)')
     parser.add_argument('--no-scholarly', action='store_true',
                        help='Disable Google Scholar API (only use Crossref and Semantic Scholar)')
 
