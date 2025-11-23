@@ -1533,7 +1533,7 @@ class BibTeXAPIChecker:
 
     def add_missing_fields(self, bib_data: BibliographyData,
                            target_fields: Optional[List[str]] = None,
-                           scholarly_delay: float = 3.0) -> BibliographyData:
+                           scholarly_delay: float = 10.0) -> BibliographyData:
         """
         Add missing fields to entries by querying APIs.
         Only processes entries that are missing the specified fields and have a DOI.
@@ -1542,7 +1542,7 @@ class BibTeXAPIChecker:
         Args:
             bib_data: The bibliography database
             target_fields: List of field names to add if missing (default: ['pages', 'number', 'volume'])
-            scholarly_delay: Delay in seconds when using Scholarly API (default: 3.0s)
+            scholarly_delay: Delay in seconds when using Scholarly API (default: 10.0s)
 
         Returns:
             Updated BibliographyData object
@@ -1644,11 +1644,11 @@ class BibTeXAPIChecker:
                         api_words = set(re.sub(r'[^\w\s]', '', api_title).split())
                         if entry_words and api_words:
                             overlap = len(entry_words & api_words) / len(entry_words | api_words)
-                            if overlap > 0.3:  # Very lenient - just 30% word overlap
+                            if overlap > 0.7:  # 70% word overlap for minor differences (caps, punctuation, spacing)
                                 title_ok = True
                                 self.log(f"✓ Title overlap {overlap:.2%}, accepting DOI match")
                             else:
-                                # Even with low overlap, if DOI matches, log warning but continue
+                                # Lower overlap indicates potential mismatch - warn but trust DOI
                                 self.log(f"⚠ Low title overlap {overlap:.2%} but DOI matches - proceeding cautiously")
                                 print(f"  ⚠ Warning: Title mismatch (local: '{title[:50]}...', API: '{api_title[:50]}...') but DOI matches")
                                 title_ok = True
@@ -2031,8 +2031,8 @@ Examples:
     parser.add_argument('--fields', nargs='+', default=['pages', 'number', 'volume'],
                        help='Specify which fields to add when using --add-missing-fields '
                             '(default: pages number volume)')
-    parser.add_argument('--scholarly-delay', type=float, default=3.0,
-                       help='Delay between Scholarly queries when adding missing fields (default: 3.0s)')
+    parser.add_argument('--scholarly-delay', type=float, default=10.0,
+                       help='Delay between Scholarly queries when adding missing fields (default: 10.0s)')
     parser.add_argument('--no-scholarly', action='store_true',
                        help='Disable Google Scholar API (only use Crossref and Semantic Scholar)')
 
