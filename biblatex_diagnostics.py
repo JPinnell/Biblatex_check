@@ -1531,6 +1531,218 @@ class BibTeXAPIChecker:
             if not any(m['entry_id'] == key for m in self.matches):
                 self.not_found.append(key)
 
+    def add_missing_fields(self, bib_data: BibliographyData,
+                           target_fields: Optional[List[str]] = None,
+                           scholarly_delay: float = 3.0) -> BibliographyData:
+        """
+        Add missing fields to entries by querying APIs.
+        Only updates entries that have both title and DOI.
+        Adds only the missing fields without replacing the entire entry.
+
+        Args:
+            bib_data: The bibliography database
+            target_fields: List of field names to add if missing (default: ['pages', 'number', 'volume'])
+            scholarly_delay: Delay in seconds when using Scholarly API (default: 3.0s)
+
+        Returns:
+            Updated BibliographyData object
+        """
+        if target_fields is None:
+            target_fields = ['pages', 'number', 'volume']
+
+        # Normalize target fields to handle BibTeX/BibLaTeX alternatives
+        # 'number' and 'issue' are aliases
+        normalized_targets = set()
+        for field in target_fields:
+            if field in ['number', 'issue']:
+                normalized_targets.add('number')
+                normalized_targets.add('issue')
+            else:
+                normalized_targets.add(field)
+
+        total = len(bib_data.entries)
+        print(f"\nAdding missing fields ({', '.join(target_fields)}) to entries...")
+        print("=" * 60)
+
+        updated_count = 0
+        crossref_count = 0
+        scholarly_count = 0
+        skipped_no_doi_title = 0
+        skipped_no_missing_fields = 0
+
+        for idx, (key, entry) in enumerate(list(bib_data.entries.items()), 1):
+            print(f"\n[{idx}/{total}] Checking: {key}")
+
+            # Skip certain entry types
+            if (entry.type or '').lower() in SKIPPED_ENTRY_TYPES:
+                print(f"  - Skipping entry type '{entry.type}'")
+                continue
+
+            # Check if entry has both title and DOI (required for matching)
+            title = entry.fields.get('title', '').strip('{}').strip()
+            doi = entry.fields.get('doi', '').strip()
+
+            if not title or not doi:
+                print(f"  - Skipping: missing title or DOI (required for safe matching)")
+                skipped_no_doi_title += 1
+                continue
+
+            # Check which target fields are missing
+            missing_fields = []
+            for field in normalized_targets:
+                if field not in entry.fields:
+                    missing_fields.append(field)
+
+            # Skip if no target fields are missing
+            if not missing_fields:
+                print(f"  - Already has all target fields")
+                skipped_no_missing_fields += 1
+                continue
+
+            print(f"  - Missing fields: {', '.join(missing_fields)}")
+
+            # Track which fields were added
+            fields_added = []
+            fields_still_missing = list(missing_fields)
+
+            # Try Crossref API first (using DOI for exact match)
+            try:
+                self.log(f"Querying Crossref for DOI: {doi}")
+                doi_url = f"{CROSSREF_API_BASE}/works/{doi}"
+                headers = {'User-Agent': f'biblatex-diagnostics/1.0 (mailto:{MAILTO_EMAIL})'}
+
+                response = requests.get(doi_url, headers=headers, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get('message'):
+                    result = data['message']
+                    api_title = ''.join(result.get('title', [''])).lower()
+                    entry_title_lower = title.lower()
+
+                    # Verify title matches before adding fields
+                    if self._titles_match(entry_title_lower, api_title):
+                        self.log("✓ Title matches, checking for missing fields in Crossref data")
+
+                        # Add missing fields from Crossref result
+                        if 'pages' in fields_still_missing and 'page' in result:
+                            pages = result['page']
+                            # Format pages with double hyphens (--)
+                            pages = pages.replace('–', '--')  # en-dash to double hyphen
+                            pages = pages.replace('—', '--')  # em-dash to double hyphen
+                            if '--' not in pages:
+                                pages = pages.replace('-', '--')
+                            entry.fields['pages'] = clean_api_field(pages)
+                            fields_added.append('pages')
+                            fields_still_missing.remove('pages')
+
+                        if 'volume' in fields_still_missing and 'volume' in result:
+                            entry.fields['volume'] = clean_api_field(str(result['volume']))
+                            fields_added.append('volume')
+                            fields_still_missing.remove('volume')
+
+                        # Crossref uses 'issue' field, we store as 'number' (BibTeX/BibLaTeX standard)
+                        if ('number' in fields_still_missing or 'issue' in fields_still_missing) and 'issue' in result:
+                            entry.fields['number'] = clean_api_field(str(result['issue']))
+                            fields_added.append('number')
+                            if 'number' in fields_still_missing:
+                                fields_still_missing.remove('number')
+                            if 'issue' in fields_still_missing:
+                                fields_still_missing.remove('issue')
+
+                        if fields_added:
+                            print(f"  ✓ Added from Crossref: {', '.join(fields_added)}")
+                            crossref_count += 1
+                            updated_count += 1
+                    else:
+                        print(f"  ✗ Title mismatch with Crossref, skipping")
+
+            except Exception as e:
+                self.log(f"Crossref error: {str(e)}")
+                print(f"  - Crossref query failed: {str(e)}")
+
+            time.sleep(self.delay)
+
+            # If any fields are still missing, try Scholarly API as fallback
+            if fields_still_missing and self.use_scholarly:
+                print(f"  - Trying Scholarly for remaining fields: {', '.join(fields_still_missing)}")
+
+                try:
+                    # Search by title in Scholarly
+                    search_query = scholarly.search_pubs(title)
+                    result = next(search_query, None)
+
+                    if result:
+                        gs_title = result.get('bib', {}).get('title', '').lower()
+                        entry_title = title.lower()
+
+                        if self._titles_match(entry_title, gs_title):
+                            self.log("✓ Title matches in Scholarly, checking for fields")
+                            bib = result.get('bib', {})
+                            scholarly_fields_added = []
+
+                            # Try to extract missing fields from Scholarly
+                            # Note: Scholarly doesn't always have complete data
+                            if 'pages' in fields_still_missing:
+                                # Scholarly might have 'pages' in bib dict
+                                pages_data = bib.get('pages', '')
+                                if pages_data:
+                                    # Ensure double hyphen format
+                                    pages_data = str(pages_data)
+                                    pages_data = pages_data.replace('–', '--')
+                                    pages_data = pages_data.replace('—', '--')
+                                    if '--' not in pages_data and '-' in pages_data:
+                                        pages_data = pages_data.replace('-', '--')
+                                    entry.fields['pages'] = pages_data
+                                    scholarly_fields_added.append('pages')
+                                    fields_still_missing.remove('pages')
+
+                            if 'volume' in fields_still_missing:
+                                volume_data = bib.get('volume', '')
+                                if volume_data:
+                                    entry.fields['volume'] = str(volume_data)
+                                    scholarly_fields_added.append('volume')
+                                    fields_still_missing.remove('volume')
+
+                            if 'number' in fields_still_missing or 'issue' in fields_still_missing:
+                                number_data = bib.get('number', '')
+                                if number_data:
+                                    entry.fields['number'] = str(number_data)
+                                    scholarly_fields_added.append('number')
+                                    if 'number' in fields_still_missing:
+                                        fields_still_missing.remove('number')
+                                    if 'issue' in fields_still_missing:
+                                        fields_still_missing.remove('issue')
+
+                            if scholarly_fields_added:
+                                print(f"  ✓ Added from Scholarly: {', '.join(scholarly_fields_added)}")
+                                scholarly_count += 1
+                                if not fields_added:  # Only increment if Crossref didn't update
+                                    updated_count += 1
+                                fields_added.extend(scholarly_fields_added)
+                        else:
+                            print(f"  ✗ Title mismatch with Scholarly")
+
+                except Exception as e:
+                    self.log(f"Scholarly error: {str(e)}")
+                    print(f"  - Scholarly query failed: {str(e)}")
+
+                # Respectful delay for Scholarly
+                time.sleep(scholarly_delay)
+
+            # Report final status
+            if fields_still_missing:
+                print(f"  - Still missing: {', '.join(fields_still_missing)}")
+
+        print(f"\n{'=' * 60}")
+        print(f"Updated {updated_count}/{total} entries")
+        print(f"  - Fields added via Crossref: {crossref_count} entries")
+        print(f"  - Fields added via Scholarly: {scholarly_count} entries")
+        print(f"  - Skipped (no DOI/title): {skipped_no_doi_title}")
+        print(f"  - Skipped (no missing fields): {skipped_no_missing_fields}")
+
+        return bib_data
+
     def update_with_apis(self, bib_data: BibliographyData) -> BibliographyData:
         """Update entries with API data."""
         total = len(bib_data.entries)
@@ -1757,6 +1969,12 @@ Examples:
   # Update entries with API data
   python biblatex_diagnostics.py input.bib --update -o corrected.bib
 
+  # Add missing fields (pages, volume, number) to entries
+  python biblatex_diagnostics.py input.bib --add-missing-fields -o corrected.bib
+
+  # Add specific missing fields
+  python biblatex_diagnostics.py input.bib --add-missing-fields --fields pages volume -o corrected.bib
+
   # Save validation report to file
   python biblatex_diagnostics.py input.bib -r report.txt
 
@@ -1773,6 +1991,14 @@ Examples:
                        help='Delay between Crossref queries (default: 0.05s for 20 req/sec)')
     parser.add_argument('--update', action='store_true',
                        help='Update entries with API data (requires -o)')
+    parser.add_argument('--add-missing-fields', action='store_true',
+                       help='Add missing fields to entries (pages, volume, number) without replacing entire entries. '
+                            'Requires both title and DOI for safe matching. Use with -o to save results.')
+    parser.add_argument('--fields', nargs='+', default=['pages', 'number', 'volume'],
+                       help='Specify which fields to add when using --add-missing-fields '
+                            '(default: pages number volume)')
+    parser.add_argument('--scholarly-delay', type=float, default=3.0,
+                       help='Delay between Scholarly queries when adding missing fields (default: 3.0s)')
     parser.add_argument('--no-scholarly', action='store_true',
                        help='Disable Google Scholar API (only use Crossref and Semantic Scholar)')
 
@@ -1780,6 +2006,12 @@ Examples:
 
     if args.update and not args.output:
         parser.error("--update requires -o/--output")
+
+    if args.add_missing_fields and not args.output:
+        parser.error("--add-missing-fields requires -o/--output")
+
+    if args.update and args.add_missing_fields:
+        parser.error("Cannot use both --update and --add-missing-fields at the same time")
 
     # Clean file paths
     args.input_file = clean_filepath(args.input_file)
@@ -1795,7 +2027,16 @@ Examples:
         # Load BibTeX file
         bib_data = checker.load_bibtex(args.input_file)
 
-        if args.update:
+        if args.add_missing_fields:
+            # Add missing fields mode
+            bib_data = checker.add_missing_fields(
+                bib_data,
+                target_fields=args.fields,
+                scholarly_delay=args.scholarly_delay
+            )
+            checker.save_bibtex(bib_data, args.output)
+            print(f"\n✓ Updated BibTeX with missing fields saved to: {args.output}")
+        elif args.update:
             # Update mode
             bib_data = checker.update_with_apis(bib_data)
             checker.save_bibtex(bib_data, args.output)
@@ -1804,14 +2045,15 @@ Examples:
             # Validation mode
             checker.validate_all_entries(bib_data)
 
-        # Generate report
-        report = checker.generate_report(bib_data)
-        if args.report_file:
-            with open(args.report_file, 'w', encoding='utf-8') as f:
-                f.write(report)
-            print(f"\n✓ Validation report saved to: {args.report_file}")
-        else:
-            print(report)
+        # Generate report (only for validation mode)
+        if not args.update and not args.add_missing_fields:
+            report = checker.generate_report(bib_data)
+            if args.report_file:
+                with open(args.report_file, 'w', encoding='utf-8') as f:
+                    f.write(report)
+                print(f"\n✓ Validation report saved to: {args.report_file}")
+            else:
+                print(report)
 
     except FileNotFoundError:
         print(f"Error: File '{args.input_file}' not found")
