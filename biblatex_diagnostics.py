@@ -1809,7 +1809,16 @@ class BibTeXAPIChecker:
                                 fields_added.extend(scholarly_fields_added)
                         else:
                             print(f"  ✗ Title overlap too low ({overlap:.2%}) with Scholarly")
+                            print(f"     Local title:  '{entry_title[:80]}...'")
+                            print(f"     Scholar title: '{gs_title[:80]}...'")
+                            # Show first 5 words from each to diagnose the mismatch
+                            local_sample = sorted(entry_words)[:5]
+                            scholar_sample = sorted(gs_words)[:5]
+                            print(f"     Local words (first 5):  {local_sample}")
+                            print(f"     Scholar words (first 5): {scholar_sample}")
                             self.log(f"  Expected overlap >50%, got {overlap:.2%}")
+                            self.log(f"  Full local words: {sorted(entry_words)}")
+                            self.log(f"  Full Scholar words: {sorted(gs_words)}")
                     else:
                         print(f"  ✗ No results from Scholarly")
                         self.log("Scholarly search returned no results")
