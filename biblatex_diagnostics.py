@@ -697,7 +697,10 @@ class BibTeXAPIChecker:
                     comma = '' if is_last else ','
 
                     # Format value with braces
-                    if not value.startswith('{'):
+                    # Ensure the entire value is wrapped in braces
+                    # Check both start AND end to avoid issues with nested braces
+                    # e.g., "{AIP} Publishing" needs to become "{{AIP} Publishing}"
+                    if not (value.startswith('{') and value.endswith('}')):
                         value = '{' + value + '}'
 
                     f.write(f"    {name} = {value}{comma}\n")
