@@ -1723,18 +1723,37 @@ class BibTeXAPIChecker:
                     search_title = ' '.join(search_title.split())  # Normalize whitespace
 
                     self.log(f"Original title: {title}")
-                    self.log(f"Search title: {search_title}")
+                    self.log(f"Searching Scholarly with: '{search_title}'")
 
                     # Search by title in Scholarly (using persistent session)
-                    search_query = scholarly.search_pubs(search_title)
-                    result = next(search_query, None)
+                    try:
+                        search_query = scholarly.search_pubs(search_title)
+                        result = next(search_query, None)
+                    except StopIteration:
+                        result = None
+                        self.log("Scholarly search returned StopIteration (no results)")
+                    except Exception as search_error:
+                        result = None
+                        error_msg = str(search_error)
+                        self.log(f"Scholarly search exception: {error_msg}")
+                        print(f"  ⚠ Scholarly search error: {error_msg}")
+                        # Check if we might be blocked
+                        if "429" in error_msg or "captcha" in error_msg.lower() or "blocked" in error_msg.lower():
+                            print(f"  ⚠ WARNING: Google Scholar is likely blocking requests!")
+                            print(f"  ⚠ Try waiting several minutes or use a VPN/proxy")
+                            self.scholarly_session_active = False  # Disable further Scholarly queries
+                        # Re-raise to be caught by outer exception handler
+                        raise
 
                     if result:
+                        # Log the full result for debugging
+                        self.log(f"Scholarly result: {result}")
+
                         gs_title = result.get('bib', {}).get('title', '').lower()
                         entry_title = search_title.lower()  # Use cleaned title for comparison
 
-                        self.log(f"Scholarly returned title: {gs_title}")
-                        self.log(f"Comparing with: {entry_title}")
+                        self.log(f"Scholarly returned title: '{gs_title}'")
+                        self.log(f"Comparing with: '{entry_title}'")
 
                         # Relaxed title matching for Scholarly
                         entry_words = set(re.sub(r'[^\w\s]', '', entry_title).split())
@@ -1794,6 +1813,8 @@ class BibTeXAPIChecker:
                     else:
                         print(f"  ✗ No results from Scholarly")
                         self.log("Scholarly search returned no results")
+                        self.log(f"  This could indicate Google Scholar is rate-limiting/blocking requests")
+                        self.log(f"  Try: 1) Wait several minutes, 2) Use VPN, or 3) Reduce query rate")
 
                 except Exception as e:
                     self.log(f"Scholarly error: {str(e)}")
