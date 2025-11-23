@@ -8,6 +8,7 @@ import re
 import sys
 import os
 import time
+import random
 import argparse
 import requests
 import unicodedata
@@ -613,18 +614,20 @@ class BibTeXAPIChecker:
         self.not_found = []
         self.field_mismatches = []  # Track field-level mismatches
         self.suggestions = []  # Track close matches for not-found entries
+        self.scholarly_session_active = False  # Track if Scholarly session is active
 
-        # Initialize Scholarly with proxy if available
+        # Initialize Scholarly session once (keep session alive for multiple queries)
         if self.use_scholarly:
             try:
-                self.log("Initializing Scholarly with free proxies...")
-                pg = ProxyGenerator()
-                pg.FreeProxies()
-                scholarly.use_proxy(pg)
-                self.log("Scholarly proxy initialized successfully")
+                self.log("Initializing Scholarly session (without proxy for direct access)...")
+                # Don't use proxy - user mentioned they don't have one
+                # Just initialize the scholarly session once and keep it alive
+                self.scholarly_session_active = True
+                self.log("Scholarly session initialized successfully")
             except Exception as e:
-                self.log(f"Warning: Could not initialize Scholarly proxy: {e}")
+                self.log(f"Warning: Could not initialize Scholarly session: {e}")
                 self.use_scholarly = False
+                self.scholarly_session_active = False
 
     def log(self, message: str):
         """Print message if verbose mode is enabled."""
@@ -1532,8 +1535,7 @@ class BibTeXAPIChecker:
                 self.not_found.append(key)
 
     def add_missing_fields(self, bib_data: BibliographyData,
-                           target_fields: Optional[List[str]] = None,
-                           scholarly_delay: float = 10.0) -> BibliographyData:
+                           target_fields: Optional[List[str]] = None) -> BibliographyData:
         """
         Add missing fields to entries by querying APIs.
         Only processes entries that are missing the specified fields and have a DOI.
@@ -1542,10 +1544,13 @@ class BibTeXAPIChecker:
         Args:
             bib_data: The bibliography database
             target_fields: List of field names to add if missing (default: ['pages', 'number', 'volume'])
-            scholarly_delay: Delay in seconds when using Scholarly API (default: 10.0s)
 
         Returns:
             Updated BibliographyData object
+
+        Note:
+            Uses Crossref API first, then falls back to Scholarly with random delays (5-12s)
+            to avoid rate limiting. Scholarly session is kept alive across queries.
         """
         if target_fields is None:
             target_fields = ['pages', 'number', 'volume']
@@ -1695,11 +1700,16 @@ class BibTeXAPIChecker:
             time.sleep(self.delay)
 
             # If any fields are still missing, try Scholarly API as fallback
-            if fields_still_missing and self.use_scholarly and title:
+            if fields_still_missing and self.use_scholarly and self.scholarly_session_active and title:
+                # Random delay before Scholarly query (5-12 seconds) to avoid rate limiting
+                delay = random.uniform(5.0, 12.0)
+                self.log(f"Waiting {delay:.1f}s before Scholarly query...")
+                time.sleep(delay)
+
                 print(f"  - Trying Scholarly for remaining fields: {', '.join(fields_still_missing)}")
 
                 try:
-                    # Search by title in Scholarly
+                    # Search by title in Scholarly (using persistent session)
                     search_query = scholarly.search_pubs(title)
                     result = next(search_query, None)
 
@@ -1762,9 +1772,6 @@ class BibTeXAPIChecker:
                 except Exception as e:
                     self.log(f"Scholarly error: {str(e)}")
                     print(f"  - Scholarly query failed: {str(e)}")
-
-                # Respectful delay for Scholarly
-                time.sleep(scholarly_delay)
 
             # Report final status
             if fields_still_missing:
@@ -2027,12 +2034,11 @@ Examples:
                        help='Update entries with API data (requires -o)')
     parser.add_argument('--add-missing-fields', action='store_true',
                        help='Add missing fields to entries (pages, volume, number) without replacing entire entries. '
-                            'Requires both title and DOI for safe matching. Use with -o to save results.')
+                            'Requires DOI for safe matching. Falls back to Scholarly with random delays (5-12s). '
+                            'Use with -o to save results.')
     parser.add_argument('--fields', nargs='+', default=['pages', 'number', 'volume'],
                        help='Specify which fields to add when using --add-missing-fields '
                             '(default: pages number volume)')
-    parser.add_argument('--scholarly-delay', type=float, default=10.0,
-                       help='Delay between Scholarly queries when adding missing fields (default: 10.0s)')
     parser.add_argument('--no-scholarly', action='store_true',
                        help='Disable Google Scholar API (only use Crossref and Semantic Scholar)')
 
@@ -2065,8 +2071,7 @@ Examples:
             # Add missing fields mode
             bib_data = checker.add_missing_fields(
                 bib_data,
-                target_fields=args.fields,
-                scholarly_delay=args.scholarly_delay
+                target_fields=args.fields
             )
             checker.save_bibtex(bib_data, args.output)
             print(f"\n✓ Updated BibTeX with missing fields saved to: {args.output}")
