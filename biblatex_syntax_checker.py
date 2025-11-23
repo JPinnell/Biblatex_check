@@ -12,6 +12,28 @@ from typing import List, Tuple, Dict, Set
 from collections import defaultdict
 
 
+def clean_filepath(filepath: str) -> str:
+    """
+    Clean file path by removing surrounding quotes and whitespace.
+    Also handles paths with double backslashes if they are passed as literal strings.
+    """
+    if not filepath:
+        return filepath
+
+    # Strip whitespace
+    cleaned = filepath.strip()
+
+    # Strip surrounding quotes (single or double)
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or \
+       (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1]
+
+    # Strip whitespace again in case quotes were around whitespace
+    cleaned = cleaned.strip()
+
+    return cleaned
+
+
 class SyntaxIssue:
     """Represents a syntax issue in a BibTeX file."""
 
@@ -420,6 +442,11 @@ prevent pybtex from parsing your .bib file. Run this BEFORE other tools.
     parser.add_argument('-r', '--report-file', help='Save report to file')
 
     args = parser.parse_args()
+
+    # Clean file paths
+    args.input_file = clean_filepath(args.input_file)
+    if args.report_file:
+        args.report_file = clean_filepath(args.report_file)
 
     # Initialize checker
     checker = BibTeXSyntaxChecker(args.input_file)

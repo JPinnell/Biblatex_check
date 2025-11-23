@@ -6,12 +6,35 @@ Local formatting validation and fixing for BibTeX files (no API calls).
 
 import re
 import sys
+import os
 import argparse
 from typing import Dict, List, Tuple, Optional, Set
 from datetime import datetime
 from difflib import SequenceMatcher
 from pybtex.database import parse_file, BibliographyData, Entry
 from pybtex.database.output.bibtex import Writer
+
+
+def clean_filepath(filepath: str) -> str:
+    """
+    Clean file path by removing surrounding quotes and whitespace.
+    Also handles paths with double backslashes if they are passed as literal strings.
+    """
+    if not filepath:
+        return filepath
+
+    # Strip whitespace
+    cleaned = filepath.strip()
+
+    # Strip surrounding quotes (single or double)
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or \
+       (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1]
+
+    # Strip whitespace again in case quotes were around whitespace
+    cleaned = cleaned.strip()
+
+    return cleaned
 
 
 # Entry type specifications (accepts both BibTeX and BibLaTeX field names)
@@ -829,6 +852,11 @@ Examples:
     parser.add_argument('--no-duplicates', action='store_true', help='Skip duplicate detection')
 
     args = parser.parse_args()
+
+    # Clean file paths
+    args.input_file = clean_filepath(args.input_file)
+    if args.report_file:
+        args.report_file = clean_filepath(args.report_file)
 
     # Initialize cleaner
     cleaner = BibTeXCleaner(verbose=args.verbose)
