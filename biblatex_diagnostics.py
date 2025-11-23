@@ -1709,20 +1709,39 @@ class BibTeXAPIChecker:
                 print(f"  - Trying Scholarly for remaining fields: {', '.join(fields_still_missing)}")
 
                 try:
+                    # Clean the title for Scholarly search - remove LaTeX formatting
+                    # Scholarly doesn't understand LaTeX, so we need to normalize it
+                    search_title = title
+                    # Remove common LaTeX commands and braces
+                    search_title = re.sub(r'\{([^}]*)\}', r'\1', search_title)  # Remove braces but keep content
+                    search_title = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', search_title)  # Remove \command{text}
+                    search_title = re.sub(r'\\[a-zA-Z]+', '', search_title)  # Remove other commands
+                    search_title = search_title.replace('--', '-')  # Double dash to single
+                    search_title = ' '.join(search_title.split())  # Normalize whitespace
+
+                    self.log(f"Original title: {title}")
+                    self.log(f"Search title: {search_title}")
+
                     # Search by title in Scholarly (using persistent session)
-                    search_query = scholarly.search_pubs(title)
+                    search_query = scholarly.search_pubs(search_title)
                     result = next(search_query, None)
 
                     if result:
                         gs_title = result.get('bib', {}).get('title', '').lower()
-                        entry_title = title.lower()
+                        entry_title = search_title.lower()  # Use cleaned title for comparison
 
-                        # Relaxed title matching for Scholarly too
+                        self.log(f"Scholarly returned title: {gs_title}")
+                        self.log(f"Comparing with: {entry_title}")
+
+                        # Relaxed title matching for Scholarly
                         entry_words = set(re.sub(r'[^\w\s]', '', entry_title).split())
                         gs_words = set(re.sub(r'[^\w\s]', '', gs_title).split())
                         overlap = 0
                         if entry_words and gs_words:
                             overlap = len(entry_words & gs_words) / len(entry_words | gs_words)
+                            self.log(f"Word overlap: {overlap:.2%}")
+                            self.log(f"Entry words: {sorted(entry_words)}")
+                            self.log(f"GS words: {sorted(gs_words)}")
 
                         if overlap > 0.5:  # 50% overlap for Scholarly (no DOI verification)
                             self.log(f"✓ Title overlap {overlap:.2%} with Scholarly")
@@ -1768,6 +1787,10 @@ class BibTeXAPIChecker:
                                 fields_added.extend(scholarly_fields_added)
                         else:
                             print(f"  ✗ Title overlap too low ({overlap:.2%}) with Scholarly")
+                            self.log(f"  Expected overlap >50%, got {overlap:.2%}")
+                    else:
+                        print(f"  ✗ No results from Scholarly")
+                        self.log("Scholarly search returned no results")
 
                 except Exception as e:
                     self.log(f"Scholarly error: {str(e)}")
