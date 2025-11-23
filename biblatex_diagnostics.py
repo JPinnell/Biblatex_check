@@ -38,6 +38,28 @@ NAME_SUFFIXES = {'jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'v'}
 SKIPPED_ENTRY_TYPES = {'phdthesis', 'misc', 'online'}
 
 
+def clean_filepath(filepath: str) -> str:
+    """
+    Clean file path by removing surrounding quotes and whitespace.
+    Also handles paths with double backslashes if they are passed as literal strings.
+    """
+    if not filepath:
+        return filepath
+
+    # Strip whitespace
+    cleaned = filepath.strip()
+
+    # Strip surrounding quotes (single or double)
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or \
+       (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1]
+
+    # Strip whitespace again in case quotes were around whitespace
+    cleaned = cleaned.strip()
+
+    return cleaned
+
+
 def remove_accents(text: str) -> str:
     """
     Remove accents from Unicode string and normalize special characters.
@@ -1758,6 +1780,13 @@ Examples:
 
     if args.update and not args.output:
         parser.error("--update requires -o/--output")
+
+    # Clean file paths
+    args.input_file = clean_filepath(args.input_file)
+    if args.output:
+        args.output = clean_filepath(args.output)
+    if args.report_file:
+        args.report_file = clean_filepath(args.report_file)
 
     # Initialize checker
     checker = BibTeXAPIChecker(verbose=args.verbose, delay=args.delay, use_scholarly=not args.no_scholarly)
