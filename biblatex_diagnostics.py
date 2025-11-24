@@ -1560,9 +1560,15 @@ class BibTeXAPIChecker:
         print(f"\nScanning for entries with missing fields ({', '.join(target_fields)})...")
         entries_to_process = []
 
+        # Entry types that can have volume/number/pages
+        # Only articles, reviews, and periodicals have journal volume/issue/pages
+        VALID_TYPES_FOR_VOLUME_NUMBER = {'article', 'review', 'periodical'}
+
         for key, entry in bib_data.entries.items():
+            entry_type = (entry.type or '').lower()
+
             # Skip certain entry types
-            if (entry.type or '').lower() in SKIPPED_ENTRY_TYPES:
+            if entry_type in SKIPPED_ENTRY_TYPES:
                 continue
 
             # Must have DOI for safe matching
@@ -1574,6 +1580,12 @@ class BibTeXAPIChecker:
             # IMPORTANT: 'number' and 'issue' are BibTeX/BibLaTeX alternatives - treat as same field
             missing_fields = []
             for field in target_fields:
+                # volume/number only apply to articles and similar types
+                # Books, theses, proceedings, etc. don't have journal volume/issue
+                if field in ['volume', 'number', 'issue']:
+                    if entry_type not in VALID_TYPES_FOR_VOLUME_NUMBER:
+                        continue  # Skip this field for non-article types
+
                 if field in ['number', 'issue']:
                     # Check if EITHER number OR issue exists (they're alternatives)
                     if 'number' not in entry.fields and 'issue' not in entry.fields:
