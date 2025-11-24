@@ -670,12 +670,42 @@ class BibTeXAPIChecker:
 
     def save_bibtex(self, bib_data: BibliographyData, filepath: str):
         """
-        Save BibTeX database to file using pybtex's Writer.
-        This ensures proper formatting and preserves existing fields exactly as they were.
+        Save BibTeX database to file preserving original formatting.
+        CRITICAL: Does NOT modify any existing field values - writes them exactly as stored.
         """
-        writer = Writer()
         with open(filepath, 'w', encoding='utf-8') as f:
-            writer.write_stream(bib_data, f)
+            for key, entry in bib_data.entries.items():
+                # Write entry header
+                f.write(f"@{entry.type}{{{key},\n")
+
+                # Collect all items (persons + fields) to determine last item
+                items = []
+
+                # Add persons (author, editor, etc.)
+                for role, persons in entry.persons.items():
+                    if persons:
+                        names = []
+                        for person in persons:
+                            names.append(str(person))
+                        author_str = ' and '.join(names)
+                        items.append(('person', role, author_str))
+
+                # Add fields - preserve EXACT values, don't modify braces
+                for field, value in entry.fields.items():
+                    items.append(('field', field, value))
+
+                # Write all items with commas except the last
+                for idx, (item_type, name, value) in enumerate(items):
+                    is_last = (idx == len(items) - 1)
+                    comma = '' if is_last else ','
+
+                    # Write value EXACTLY as it is stored - DO NOT add/remove braces
+                    # The value is already in the correct format from the original file
+                    f.write(f"    {name} = {{{value}}}{comma}\n")
+
+                # Close entry
+                f.write("}\n\n")
+
         self.log(f"Saved corrected BibTeX to: {filepath}")
 
     def _titles_match(self, title1: str, title2: str) -> bool:
@@ -1526,16 +1556,6 @@ class BibTeXAPIChecker:
         if target_fields is None:
             target_fields = ['pages', 'number', 'volume']
 
-        # Normalize target fields to handle BibTeX/BibLaTeX alternatives
-        # 'number' and 'issue' are aliases
-        normalized_targets = set()
-        for field in target_fields:
-            if field in ['number', 'issue']:
-                normalized_targets.add('number')
-                normalized_targets.add('issue')
-            else:
-                normalized_targets.add(field)
-
         # STEP 1: Filter entries that have missing target fields AND have a DOI
         print(f"\nScanning for entries with missing fields ({', '.join(target_fields)})...")
         entries_to_process = []
@@ -1551,10 +1571,17 @@ class BibTeXAPIChecker:
                 continue
 
             # Check which target fields are missing
+            # IMPORTANT: 'number' and 'issue' are BibTeX/BibLaTeX alternatives - treat as same field
             missing_fields = []
-            for field in normalized_targets:
-                if field not in entry.fields:
-                    missing_fields.append(field)
+            for field in target_fields:
+                if field in ['number', 'issue']:
+                    # Check if EITHER number OR issue exists (they're alternatives)
+                    if 'number' not in entry.fields and 'issue' not in entry.fields:
+                        missing_fields.append('number')  # Report as 'number' missing
+                else:
+                    # Regular field - just check if it exists
+                    if field not in entry.fields:
+                        missing_fields.append(field)
 
             # Only process if at least one target field is missing
             if missing_fields:
@@ -1650,14 +1677,12 @@ class BibTeXAPIChecker:
                             fields_added.append('volume')
                             fields_still_missing.remove('volume')
 
-                        # Crossref uses 'issue' field, we store as 'number' (BibTeX/BibLaTeX standard)
-                        if ('number' in fields_still_missing or 'issue' in fields_still_missing) and 'issue' in result:
+                        # Crossref uses 'issue' field, we store as 'number' (BibTeX standard)
+                        # Note: number/issue are treated as alternatives, so only 'number' appears in missing list
+                        if 'number' in fields_still_missing and 'issue' in result:
                             entry.fields['number'] = clean_api_field(str(result['issue']))
                             fields_added.append('number')
-                            if 'number' in fields_still_missing:
-                                fields_still_missing.remove('number')
-                            if 'issue' in fields_still_missing:
-                                fields_still_missing.remove('issue')
+                            fields_still_missing.remove('number')
 
                         if fields_added:
                             print(f"  ✓ Added from Crossref: {', '.join(fields_added)}")
@@ -1759,15 +1784,13 @@ class BibTeXAPIChecker:
                                     scholarly_fields_added.append('volume')
                                     fields_still_missing.remove('volume')
 
-                            if 'number' in fields_still_missing or 'issue' in fields_still_missing:
-                                number_data = bib.get('number', '')
+                            if 'number' in fields_still_missing:
+                                # Scholarly may have 'number' or 'issue' field
+                                number_data = bib.get('number', '') or bib.get('issue', '')
                                 if number_data:
                                     entry.fields['number'] = str(number_data)
                                     scholarly_fields_added.append('number')
-                                    if 'number' in fields_still_missing:
-                                        fields_still_missing.remove('number')
-                                    if 'issue' in fields_still_missing:
-                                        fields_still_missing.remove('issue')
+                                    fields_still_missing.remove('number')
 
                             if scholarly_fields_added:
                                 print(f"  ✓ Added from Scholarly: {', '.join(scholarly_fields_added)}")
